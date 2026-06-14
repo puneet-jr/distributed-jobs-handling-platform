@@ -99,3 +99,17 @@ if err := wp.repo.UpdateStatus(ctx,jobID,model.StatusRunning); err != nil {
 	log.Printf("Worker %d: Failed to update job %s to Running: %v",workerID,jobID,err)
 	return
 }
+
+//	Get Executor
+
+exec, err:= wp.registry.Get(jobType)
+
+//	Final status Update
+
+if err != nil {
+	log.Printf("Worker %d: Job %s failed: %v",workerID,jobID,err)
+	wp.repo.UpdateStatus(ctx,jobID,model.StatusFailed)
+} else {
+	log.Printf("Worker %d: Job %s completed successfully",workerID, jobID)
+	wp.repo.UpdateStatus(ctx,jobID,model.StatusCompleted)
+}
