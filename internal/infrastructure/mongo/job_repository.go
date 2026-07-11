@@ -35,11 +35,6 @@ func (r *JobRepository) SaveJobs(ctx context.Context, jobs)[Job] error {
 	return err
 }
 
-func (r *JobRepository) DeleteJobs(ctx context.Context, jobs)[Job] error {
-	_, err := r.coll.DeleteMany(ctx,jobs)
-	return err
-}
-
 func (r *JobRepository) UpdateJob(ctx context.Context, id string, job *Job) error {
 	filter := bson.M{"_id": id}
 	_, err := r.coll.UpdateOne(ctx, filter, bson.M{"$set": job})
@@ -61,4 +56,18 @@ func (r *JobRepository) GetJobs(ctx context.Context) ([]Job, error) {
 		jobs = append(jobs, job)
 	}
 	return jobs, nil
+}
+
+func (r *JobRepository) DeleteJob(context.Context,jobs)[] error {
+	_,err := r.coll.DeleteAny(ctx,jobs)
+
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func (r *JobRepository) DeleteJobs(ctx context.Context, jobs)[Job] error {
+	_, err := r.coll.DeleteMany(ctx,jobs)
+	return err
 }
