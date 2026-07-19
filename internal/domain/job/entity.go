@@ -1,27 +1,19 @@
-package http 
+package job
 
-import (
-	"http"
-	"fmt"
-	"context"
-)
+import "time"
 
-type HTTPRequest struct {
-	Method string
-	URL    string
-	Body   []byte
-}
-
-func NewHTTPRequest(method, url string, body []byte) (*HTTPRequest, error) {
-
-	var req = &HTTPRequest{
-		Method: method,
-		URL:    url,
-		Body:   body,
-	}
-	
-	if  _,err :=  req{
-		return nil, err
-	}
-	return req, nil
+type Job struct {
+	ID             string
+	Type           string
+	Status         Status
+	Priority       int
+	Payload        []byte
+	RetryCount     int
+	MaxRetries     int
+	IdempotencyKey string
+	ErrorMessage   *string
+	WorkerID       *string
+	CreatedAt      time.Time
+	StartedAt      *time.Time
+	CompletedAt    *time.Time
 }
