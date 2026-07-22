@@ -35,7 +35,7 @@ func (r *JobRepository) Create(ctx context.Context, job *domain.job) error {
 
 	query := `
 			INSERT INTO jobs (
-				id, type, status, priority, payload, 
+				id, type, status, priority, payload,
 				idempotency_key, retry_count, max_retries,
 				created_at
 			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
@@ -73,4 +73,50 @@ func (r *JobRepository) Create(ctx context.Context, job *domain.job) error {
 		}
 
 		return nil
+}
+
+
+// Why separate GetByIdempotencyKey method?
+// Service needs to check: "does this key already exist?"
+// If yes, return existing job instead of creating duplicate.
+
+func(r *JobRepository) GetByIdempotemcyKey(ctx context.Context, key string) (*domainjob.Job,error) {
+
+	query := `
+	SELECT id, type, status, priority, payload,
+		       retry_count, max_retries, error_message,
+		       worker_id, created_at, started_at, completed_at
+		FROM jobs
+		WHERE idempotency_key = $1
+	`
+	job := &domainJob.Job{}
+
+	var payloadJSON []byte
+
+	// since idempotency needed to verify and check so check all errors for the things we are measuring
+	err := r.db.QueryRowContext(ctx, query, key).Scan(
+		&job.ID,
+				&job.Type,
+				&job.Status,
+				&job.Priority,
+				&payloadJSON,
+				&job.RetryCount,
+				&job.MaxRetries,
+				&job.ErrorMessage,
+				&job.WorkerID,
+				&job.CreatedAt,
+				&job.StartedAt,
+				&job.CompletedAt,
+	)
+
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return il, domainjob.ErrJobNotFound
+		}
+		return nil, err
+	}
+
+
+
+
 }
