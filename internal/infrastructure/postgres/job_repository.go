@@ -204,10 +204,94 @@ query := `
 	if err != nil {
 		return err
 	}
-
+	
 	if rows == 0 {
 		return domainjob.Job.ErrJobNotFound
 	}
 
 	return nil
+}
+
+unc (r *JobRepository) IncrementRetryCount(ctx context.Context, id string, errMsg string) error {
+	query := `
+		UPDATE jobs 
+		SET retry_count = retry_count + 1,
+		    error_message = $2,
+		    status = 'retrying'
+		WHERE id = $1
+	`
+
+	result, err := r.db.ExecContext(ctx, query, id, errMsg)
+	if err != nil {
+		return err
+	}
+
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rows == 0 {
+		return domainjob.ErrJobNotFound
+	}
+
+	return nil
+}
+
+// Why List method with limit/offset?
+// Admin API needs pagination: "show me last 50 jobs"
+// Workers DON'T use this - they use status-based queries.
+// Separation of concerns: operational queries vs administrative queries.
+func (r *JobRepository) List(ctx context.Context, limit, offset int) ([]domainjob.Job, error) {
+	query := `
+		SELECT id, type, status, priority, payload, 
+		       idempotency_key, retry_count, max_retries, 
+		       error_message, worker_id,
+		       created_at, started_at, completed_at
+		FROM jobs
+		ORDER BY created_at DESC
+		LIMIT $1 OFFSET $2
+	`
+
+	rows, err := r.db.QueryContext(ctx, query, limit, offset)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var jobs []domainjob.Job
+	for rows.Next() {
+		job := &domainjob.Job{}
+		var payloadJSON []byte
+
+		err := rows.Scan(
+			&job.ID,
+			&job.Type,
+			&job.Status,
+			&job.Priority,
+			&payloadJSON,
+			&job.IdempotencyKey,
+			&job.RetryCount,
+			&job.MaxRetries,
+			&job.ErrorMessage,
+			&job.WorkerID,
+			&job.CreatedAt,
+			&job.StartedAt,
+			&job.CompletedAt,
+		)
+		if err != nil {
+			return nil, err
+		}
+
+		if err := json.Unmarshal(payloadJSON, &job.Payload); err != nil {
+			return nil, err
+		}
+
+		jobs = append(jobs, *job)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	return jobs, nil
 }
