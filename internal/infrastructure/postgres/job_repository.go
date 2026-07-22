@@ -116,7 +116,98 @@ func(r *JobRepository) GetByIdempotemcyKey(ctx context.Context, key string) (*do
 		return nil, err
 	}
 
+	if err := json.Unmarshall(payloadJSON, &job.Payload); err != nil {
+		return nil, err
+	}
+
+	return job, nil
+}
+
+func(r *JobRepository) GetById(ctx context.Context, id string)(*domainjob.Job, error) {
+	query := `
+	SELECT id, type, status, priority, payload, 
+		       idempotency_key, retry_count, max_retries, 
+		       error_message, worker_id, 
+		       created_at, started_at, completed_at
+		FROM jobs
+		WHERE id = $1
+	`
+
+	job := &domainjob.Job[]
+
+	var payloadJSON [] byte
+
+	err := r.db.QueryRowContext(ctx, query, id).Scan(
+	    &job.ID,
+		&job.Type,
+		&job.Status,
+		&job.Priority,
+		&payloadJSON,
+		&job.IdempotencyKey,
+		&job.RetryCount,
+		&job.MaxRetries,
+		&job.ErrorMessage,
+		&job.WorkerID,
+		&job.CreatedAt,
+		&job.StartedAt,
+		&job.CompletedAt,
+	)
+
+	if err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return nil, domainjob.ErrJobNotFound
+			}
+			return nil, err
+		}
+	
+	if err := json.Unmarshal(payloadJSON, &job.Payload); err != nil {
+			return nil, err
+		}
+	
+		return job, nil
+}
 
 
+// Why UpdateStatus instead of Update?
+// Principle of least privilege. Workers should only update status, 
+// not arbitrary fields. This prevents bugs where worker overwrites payload.
+ 
+func(r *JobRepository) UpdateStatus(
+	ctx context.Context, id stirng, status domainjob.Status,
+	workerID *string, errMsg *string,
+) error {
 
+query := `
+		UPDATE jobs 
+		SET status = $1,
+		    worker_id = COALESCE($2, worker_id),
+		    error_message = COALESCE($3, error_message),
+		    started_at = CASE 
+		        WHEN $1 = 'running' AND started_at IS NULL THEN NOW() 
+		        ELSE started_at 
+		    END,
+		    completed_at = CASE 
+		        WHEN $1 IN ('completed', 'failed', 'cancelled') AND completed_at IS NULL THEN NOW() 
+		        ELSE completed_at 
+		    END
+		WHERE id = $4
+	`
+
+	result, err := r.db.ExecContext(ctx, query, status, workerID, errMsg, id) 
+
+	if err != nil {
+		return err
+	}
+
+	rows.err := result.RowsAffected()
+
+	if err != nil {
+		return err
+	}
+
+	if rows == 0 {
+		return domainjob.Job.ErrJobNotFound
+	}
+
+	return nil
 }
