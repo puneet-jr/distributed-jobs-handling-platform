@@ -6,15 +6,18 @@ import (
 	"log/slog"
 	"net/http"
 	"time"
+
+	appjob "github.com/your-org/distributed-job-platform/internal/application/job"
+	httpapi "github.com/your-org/distributed-job-platform/internal/interfaces/http"
+
 )
 
-appjob "github.com/your-org/distributed-job-platform/internal/application/job"
-httpapi "github.com/your-org/distributed-job-platform/internal/interfaces/http"
 
 type App struct {
 	cfg 	Config
 	server *http.Server
 	logger *slog.Logger
+	db     *sql.DB
 }
 
 func NewApp(ctx context.Context, configPath string) (*App, error) {
@@ -23,20 +26,28 @@ func NewApp(ctx context.Context, configPath string) (*App, error) {
 		return nil, err
 	}
 
+	// Step 2: Initialize logger
+	// Why slog? It's Go's standard structured logging (since 1.21).
+	// Better than fmt.Printf: includes levels, context, JSON output.
 	logger := NewLogger(cfg.App.Env)
+	logger.Info("starting application bootstrap","env",cfg.App.Env)
 
-	repo, err := NewPostgresJobRepository(ctx,cfg)
-
+	db, err := sql.Open("postgres",cfg.Postgres.DSN())
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to open database: %w",err)
 	}
 
-	jobService	:= appjob.NewService(repo)
-	jobHandler := httpapi.NewHandler(jobService)
-	router := httpapi.NewRouter(jobHandler, func(w http.ResponseWriter, r *http.Request)) {
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write([]byte("ok"))
-})
+	// Why PingContext?
+		// sql.Open is lazy, so we must verify connection works NOW.
+		// Otherwise, first HTTP request fails with "database not connected".
+		// Fail fast on startup.
+		if err := db.PingContext(ctx); err != nil {
+			db.Close() // Why close? Clean up resources before returning error.
+			return nil, fmt.Errorf("failed to ping database: %w", err)
+		}
+		
+
+}
 
 } 
 

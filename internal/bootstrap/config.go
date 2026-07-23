@@ -27,6 +27,7 @@ type PostgresConfig struct {
 	User     string `yaml:"user"`
 	Password string `yaml:"password"`
 	Database string `yaml:"database"`
+	SSLMode  string `yaml:"database"`
 }
 
 type RedisConfig struct {
@@ -70,6 +71,6 @@ func (c *PostgresConfig) DSN() string {
 	)
 }
 
-func(c *RedisConfig) Address() string {
-	return fmt.Sprintf("%s:%d",c.Host,c.Port)
+func (c *RedisConfig) Address() string {
+	return fmt.Sprintf("%s:%d", c.Host, c.Port)
 }
