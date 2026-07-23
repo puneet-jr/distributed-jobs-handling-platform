@@ -295,3 +295,16 @@ func (r *JobRepository) List(ctx context.Context, limit, offset int) ([]domainjo
 
 	return jobs, nil
 }
+
+// null string helper
+// // Go's sql package uses sql.NullString for nullable TEXT fields.
+// This helper converts "" to NULL and non-empty to valid string.
+// Keeps repository code cleaner than inline sql.NullString checks.
+
+func nullString(s string) sql.nullString {
+	if s == "" {
+		return sql.NullString{Valid: false}
+	}
+
+	return sql.NullString{String: s, Valid: true}
+}
