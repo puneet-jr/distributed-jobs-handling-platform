@@ -2,6 +2,8 @@ package bootstrap
 
 import (
 	"context"
+	"database/sql"
+	"distributed-job-platform/internal/infrastructure/postgres"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -59,7 +61,7 @@ func NewApp(ctx context.Context, configPath string) (*App, error) {
 
 	if err != nil {
 		db.Close()
-		return nil, fmt.Errorf("failed to create a repository: %w",err)
+		return nil, fmt.Errorf("failed to create a repository: %w", err)
 	}
 
 	// Create application service
@@ -76,7 +78,7 @@ func NewApp(ctx context.Context, configPath string) (*App, error) {
 	router := httpapi.NewRouter(
 		jobHandler,
 		NewHealthHandler(logger, db), // Why pass db? Health check needs to verify DB is alive.
-	) 
+	)
 
 	// Step 8: Configure HTTP server
 	server := &http.Server{
@@ -90,16 +92,16 @@ func NewApp(ctx context.Context, configPath string) (*App, error) {
 
 	logger.Info("database connection established")
 
-return &App{
-	cfg:  cfg,
-	server: server,
-	logger: logger,
-	db: db,
-}, nil
+	return &App{
+		cfg:    cfg,
+		server: server,
+		logger: logger,
+		db:     db,
+	}, nil
 }
 
-func(a *App) Run(ctx context.Context) error {
-	a.logger.Info("starting api server", "port",a.cfg.HTTP.Port)
+func (a *App) Run(ctx context.Context) error {
+	a.logger.Info("starting api server", "port", a.cfg.HTTP.Port)
 
 	// Why goroutine for shutdown?
 	// ListenAndServe blocks. We need to listen for ctx.Done() simultaneously.
@@ -107,23 +109,22 @@ func(a *App) Run(ctx context.Context) error {
 	go func() {
 		<-ctx.Done()
 		a.logger.Info("shutting down server...")
-		
+
 		// Why Shutdown with timeout?
 		// Graceful shutdown: finish in-flight requests, but don't wait forever.
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 
 		if err := a.server.Shutdown(shutdownCtx); err != nil {
-			a.logger.Error("server shutdown failed","error",err)
+			a.logger.Error("server shutdown failed", "error", err)
 		}
 	}()
 
 	if err := a.server.ListenAndServer(); err != nil && err != http.ErrServerClosed {
-		return fmt.Errorf("save error: %w",err)
+		return fmt.Errorf("save error: %w", err)
 	}
 	return nil
 }
-
 
 func (a *App) Close() error {
 	if a.db != nil {
@@ -131,5 +132,5 @@ func (a *App) Close() error {
 	}
 	return nil
 }
+
 // Alternative: use "github.com/jackc/pgx/v5/stdlib" for better performance.
-// 
