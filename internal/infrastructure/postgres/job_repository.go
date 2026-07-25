@@ -3,218 +3,115 @@ package postgres
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"errors"
-	"time"
 
-	"github.com/google/uuid"
-	domainjob "github.com/your-org/distributed-job-platform/internal/domain/job"
+	domainjob "distributed-job-platform/internal/domain/job"
 )
 
-// *sql.DB is already an interface-like connection pool.
-
-type JobReposiroty struct {
+type JobRepository struct {
 	db *sql.DB
 }
 
-func NewJobRepository(db *sql.DB)(*JobRepository, error) {
-	if db ==nil {
-		return nil, errors.New("DB connec cannot be nill")
+func NewJobRepository(db *sql.DB) (*JobRepository, error) {
+	if db == nil {
+		return nil, errors.New("database connection cannot be nil")
 	}
-	return &JobRepository(db:db),nil
+	return &JobRepository{db: db}, nil
 }
 
-func (r *JobRepository) Create(ctx context.Context, job *domain.job) error {
-	payloadJSON, err := json.Marshall(job.Payload)
-
-	if err != nil {
-		return err
-	}
-
-	// on conflict handles the idempotency atomically
-
+func (r *JobRepository) Create(ctx context.Context, job *domainjob.Job) error {
 	query := `
-			INSERT INTO jobs (
-				id, type, status, priority, payload,
-				idempotency_key, retry_count, max_retries,
-				created_at
-			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-			ON CONFLICT (idempotency_key) DO NOTHING
-		`
-
-		result, err := r.db.ExecContext(ctx, query,
-				job.ID,
-				job.Type,
-				job.Status,
-				job.Priority,
-				payloadJSON,
-				nullString(job.IdempotencyKey), // Why helper? See below
-				job.RetryCount,
-				job.MaxRetries,
-				job.CreatedAt,
-			)
-			if err != nil {
-				return err
-			}
-
-			// Why check RowsAffected?
-				// ON CONFLICT DO NOTHING means: if duplicate key, don't error, just skip.
-				// But we need to know if insert happened or was skipped.
-				// RowsAffected == 0 means duplicate idempotency_key -> job already exists.
-		rows, err := result.RowsAffected()
-
-		if err != nil {
-			return err
-		}
-
-		if rows == 0 {
-		// Service layer can detect this and return existing job instead of error.
-			return domainjob.ErrDuplicateIdempotencyKey
-		}
-
-		return nil
-}
-
-
-// Why separate GetByIdempotencyKey method?
-// Service needs to check: "does this key already exist?"
-// If yes, return existing job instead of creating duplicate.
-
-func(r *JobRepository) GetByIdempotemcyKey(ctx context.Context, key string) (*domainjob.Job,error) {
-
-	query := `
-	SELECT id, type, status, priority, payload,
-		       retry_count, max_retries, error_message,
-		       worker_id, created_at, started_at, completed_at
-		FROM jobs
-		WHERE idempotency_key = $1
+		INSERT INTO jobs (
+			id, type, status, priority, payload,
+			idempotency_key, retry_count, max_retries, created_at
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+		ON CONFLICT (idempotency_key) DO NOTHING
 	`
-	job := &domainJob.Job{}
 
-	var payloadJSON []byte
-
-	// since idempotency needed to verify and check so check all errors for the things we are measuring
-	err := r.db.QueryRowContext(ctx, query, key).Scan(
-		&job.ID,
-				&job.Type,
-				&job.Status,
-				&job.Priority,
-				&payloadJSON,
-				&job.RetryCount,
-				&job.MaxRetries,
-				&job.ErrorMessage,
-				&job.WorkerID,
-				&job.CreatedAt,
-				&job.StartedAt,
-				&job.CompletedAt,
+	result, err := r.db.ExecContext(ctx, query,
+		job.ID,
+		job.Type,
+		job.Status,
+		job.Priority,
+		job.Payload,
+		nullString(job.IdempotencyKey),
+		job.RetryCount,
+		job.MaxRetries,
+		job.CreatedAt,
 	)
-
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return il, domainjob.ErrJobNotFound
-		}
-		return nil, err
-	}
-
-	if err := json.Unmarshall(payloadJSON, &job.Payload); err != nil {
-		return nil, err
-	}
-
-	return job, nil
-}
-
-func(r *JobRepository) GetById(ctx context.Context, id string)(*domainjob.Job, error) {
-	query := `
-	SELECT id, type, status, priority, payload, 
-		       idempotency_key, retry_count, max_retries, 
-		       error_message, worker_id, 
-		       created_at, started_at, completed_at
-		FROM jobs
-		WHERE id = $1
-	`
-
-	job := &domainjob.Job[]
-
-	var payloadJSON [] byte
-
-	err := r.db.QueryRowContext(ctx, query, id).Scan(
-	    &job.ID,
-		&job.Type,
-		&job.Status,
-		&job.Priority,
-		&payloadJSON,
-		&job.IdempotencyKey,
-		&job.RetryCount,
-		&job.MaxRetries,
-		&job.ErrorMessage,
-		&job.WorkerID,
-		&job.CreatedAt,
-		&job.StartedAt,
-		&job.CompletedAt,
-	)
-
-	if err != nil {
-			if errors.Is(err, sql.ErrNoRows) {
-				return nil, domainjob.ErrJobNotFound
-			}
-			return nil, err
-		}
-	
-	if err := json.Unmarshal(payloadJSON, &job.Payload); err != nil {
-			return nil, err
-		}
-	
-		return job, nil
-}
-
-
-// Why UpdateStatus instead of Update?
-// Principle of least privilege. Workers should only update status, 
-// not arbitrary fields. This prevents bugs where worker overwrites payload.
- 
-func(r *JobRepository) UpdateStatus(
-	ctx context.Context, id stirng, status domainjob.Status,
-	workerID *string, errMsg *string,
-) error {
-
-query := `
-		UPDATE jobs 
-		SET status = $1,
-		    worker_id = COALESCE($2, worker_id),
-		    error_message = COALESCE($3, error_message),
-		    started_at = CASE 
-		        WHEN $1 = 'running' AND started_at IS NULL THEN NOW() 
-		        ELSE started_at 
-		    END,
-		    completed_at = CASE 
-		        WHEN $1 IN ('completed', 'failed', 'cancelled') AND completed_at IS NULL THEN NOW() 
-		        ELSE completed_at 
-		    END
-		WHERE id = $4
-	`
-
-	result, err := r.db.ExecContext(ctx, query, status, workerID, errMsg, id) 
-
 	if err != nil {
 		return err
 	}
 
-	rows.err := result.RowsAffected()
-
+	rows, err := result.RowsAffected()
 	if err != nil {
 		return err
 	}
-	
 	if rows == 0 {
-		return domainjob.Job.ErrJobNotFound
+		return domainjob.ErrDuplicateIdempotencyKey
 	}
 
 	return nil
 }
 
-unc (r *JobRepository) IncrementRetryCount(ctx context.Context, id string, errMsg string) error {
+func (r *JobRepository) GetByIdempotencyKey(ctx context.Context, key string) (*domainjob.Job, error) {
 	query := `
-		UPDATE jobs 
+		SELECT id, type, status, priority, payload,
+		       idempotency_key, retry_count, max_retries,
+		       error_message, worker_id, created_at, started_at, completed_at
+		FROM jobs
+		WHERE idempotency_key = $1
+	`
+
+	return r.scanOne(ctx, query, key)
+}
+
+func (r *JobRepository) GetByID(ctx context.Context, id string) (*domainjob.Job, error) {
+	query := `
+		SELECT id, type, status, priority, payload,
+		       idempotency_key, retry_count, max_retries,
+		       error_message, worker_id, created_at, started_at, completed_at
+		FROM jobs
+		WHERE id = $1
+	`
+
+	return r.scanOne(ctx, query, id)
+}
+
+func (r *JobRepository) UpdateStatus(
+	ctx context.Context,
+	id string,
+	status domainjob.Status,
+	workerID *string,
+	errMsg *string,
+) error {
+	query := `
+		UPDATE jobs
+		SET status = $1,
+		    worker_id = COALESCE($2, worker_id),
+		    error_message = COALESCE($3, error_message),
+		    started_at = CASE
+		        WHEN $1 = 'running' AND started_at IS NULL THEN NOW()
+		        ELSE started_at
+		    END,
+		    completed_at = CASE
+		        WHEN $1 IN ('completed', 'failed', 'cancelled') AND completed_at IS NULL THEN NOW()
+		        ELSE completed_at
+		    END
+		WHERE id = $4
+	`
+
+	result, err := r.db.ExecContext(ctx, query, status, workerID, errMsg, id)
+	if err != nil {
+		return err
+	}
+
+	return ensureUpdated(result)
+}
+
+func (r *JobRepository) IncrementRetryCount(ctx context.Context, id string, errMsg string) error {
+	query := `
+		UPDATE jobs
 		SET retry_count = retry_count + 1,
 		    error_message = $2,
 		    status = 'retrying'
@@ -226,27 +123,14 @@ unc (r *JobRepository) IncrementRetryCount(ctx context.Context, id string, errMs
 		return err
 	}
 
-	rows, err := result.RowsAffected()
-	if err != nil {
-		return err
-	}
-	if rows == 0 {
-		return domainjob.ErrJobNotFound
-	}
-
-	return nil
+	return ensureUpdated(result)
 }
 
-// Why List method with limit/offset?
-// Admin API needs pagination: "show me last 50 jobs"
-// Workers DON'T use this - they use status-based queries.
-// Separation of concerns: operational queries vs administrative queries.
 func (r *JobRepository) List(ctx context.Context, limit, offset int) ([]domainjob.Job, error) {
 	query := `
-		SELECT id, type, status, priority, payload, 
-		       idempotency_key, retry_count, max_retries, 
-		       error_message, worker_id,
-		       created_at, started_at, completed_at
+		SELECT id, type, status, priority, payload,
+		       idempotency_key, retry_count, max_retries,
+		       error_message, worker_id, created_at, started_at, completed_at
 		FROM jobs
 		ORDER BY created_at DESC
 		LIMIT $1 OFFSET $2
@@ -258,34 +142,13 @@ func (r *JobRepository) List(ctx context.Context, limit, offset int) ([]domainjo
 	}
 	defer rows.Close()
 
-	var jobs []domainjob.Job
-	for rows.Next() {
-		job := &domainjob.Job{}
-		var payloadJSON []byte
+	jobs := make([]domainjob.Job, 0)
 
-		err := rows.Scan(
-			&job.ID,
-			&job.Type,
-			&job.Status,
-			&job.Priority,
-			&payloadJSON,
-			&job.IdempotencyKey,
-			&job.RetryCount,
-			&job.MaxRetries,
-			&job.ErrorMessage,
-			&job.WorkerID,
-			&job.CreatedAt,
-			&job.StartedAt,
-			&job.CompletedAt,
-		)
+	for rows.Next() {
+		job, err := scanJob(rows)
 		if err != nil {
 			return nil, err
 		}
-
-		if err := json.Unmarshal(payloadJSON, &job.Payload); err != nil {
-			return nil, err
-		}
-
 		jobs = append(jobs, *job)
 	}
 
@@ -296,15 +159,68 @@ func (r *JobRepository) List(ctx context.Context, limit, offset int) ([]domainjo
 	return jobs, nil
 }
 
-// null string helper
-// // Go's sql package uses sql.NullString for nullable TEXT fields.
-// This helper converts "" to NULL and non-empty to valid string.
-// Keeps repository code cleaner than inline sql.NullString checks.
+func (r *JobRepository) scanOne(ctx context.Context, query string, arg any) (*domainjob.Job, error) {
+	row := r.db.QueryRowContext(ctx, query, arg)
 
-func nullString(s string) sql.nullString {
+	job, err := scanJob(row)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, domainjob.ErrJobNotFound
+		}
+		return nil, err
+	}
+
+	return job, nil
+}
+
+type scanner interface {
+	Scan(dest ...any) error
+}
+
+func scanJob(s scanner) (*domainjob.Job, error) {
+	job := &domainjob.Job{}
+	var idempotencyKey sql.NullString
+
+	err := s.Scan(
+		&job.ID,
+		&job.Type,
+		&job.Status,
+		&job.Priority,
+		&job.Payload,
+		&idempotencyKey,
+		&job.RetryCount,
+		&job.MaxRetries,
+		&job.ErrorMessage,
+		&job.WorkerID,
+		&job.CreatedAt,
+		&job.StartedAt,
+		&job.CompletedAt,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	if idempotencyKey.Valid {
+		job.IdempotencyKey = idempotencyKey.String
+	}
+
+	return job, nil
+}
+
+func ensureUpdated(result sql.Result) error {
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rows == 0 {
+		return domainjob.ErrJobNotFound
+	}
+	return nil
+}
+
+func nullString(s string) sql.NullString {
 	if s == "" {
 		return sql.NullString{Valid: false}
 	}
-
 	return sql.NullString{String: s, Valid: true}
 }
