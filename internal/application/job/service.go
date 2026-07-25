@@ -74,3 +74,122 @@ func (s *Service) GetByIdD(ctx context.Context, id string) (*GetJobResponse, err
 		ErrorMessage: job.ErrorMessage,
 	}, nil
 }
+
+func (s *Service) MarkRunning(
+	ctx context.Context,
+	id string,
+	workerID string,
+) error {
+	if workerID == "" {
+		return errors.New("worker id is required")
+	}
+
+	return s.repo.UpdateStatusIfCurrent(
+		ctx,
+		id,
+		[]domainjob.Status{
+			domainjob.StatusPending,
+			domainjob.StatusRetrying,
+		},
+		domainjob.StatusRunning,
+		&workerID,
+		nil,
+	)
+}
+
+func (s *Service) MarkCompleted(ctx context.Context, id string, workerID string) error {
+	if workerID == "" {
+		return errors.New("worker id is required")
+	}
+
+	return s.repo.UpdateStatusIfCurrent(
+		ctx,
+		id,
+		[]domainjob.Status{
+			domainjob.StatusRunning,
+		},
+		domainjob.StatusCompleted,
+		&workerID,
+		nil,
+	)
+}
+
+func (s *Service) MarkFailed(
+	ctx context.Context,
+	id string,
+	workerID string,
+	errMsg string,
+) error {
+	if workerID == "" {
+		return errors.New("worker id is required")
+	}
+	if errMsg == "" {
+		errMsg = "job failed"
+	}
+
+	return s.repo.UpdateStatusIfCurrent(
+		ctx,
+		id,
+		[]domainjob.Status{
+			domainjob.StatusRunning,
+			domainjob.StatusRetrying,
+		},
+		domainjob.StatusFailed,
+		&workerID,
+		&errMsg,
+	)
+}
+
+func (s *Service) MarkRetrying(
+	ctx context.Context,
+	id string,
+	workerID string,
+	errMsg string,
+) error {
+	if workerID == "" {
+		return errors.New("worker id is required")
+	}
+	if errMsg == "" {
+		errMsg = "job retry scheduled"
+	}
+
+	job, err := s.repo.GetByID(ctx, id)
+	if err != nil {
+		return err
+	}
+
+	if job.RetryCount >= job.MaxRetries {
+		return s.MarkFailed(ctx, id, workerID, errMsg)
+	}
+
+	if err := s.repo.IncrementRetryCount(ctx, id, errMsg); err != nil {
+		return err
+	}
+
+	return s.repo.UpdateStatusIfCurrent(
+		ctx,
+		id,
+		[]domainjob.Status{
+			domainjob.StatusRetrying,
+		},
+		domainjob.StatusPending,
+		&workerID,
+		&errMsg,
+	)
+}
+
+func (s *Service) Cancel(ctx context.Context, id string) error {
+	return s.repo.UpdateStatusIfCurrent(
+		ctx,
+		id,
+		[]domainjob.Status{
+			domainjob.StatusPending,
+			domainjob.StatusRetrying,
+			domainjob.StatusRunning,
+		},
+		domainjob.StatusCancelled,
+		nil,
+		nil,
+	)
+}
+

@@ -109,6 +109,63 @@ func (r *JobRepository) UpdateStatus(
 	return ensureUpdated(result)
 }
 
+func (r *JobRepository) UpdateStatusIfCurrent(
+	ctx context.Context,
+	id string,
+	from []domainjob.Status,
+	to domainjob.Status,
+	workerID *string,
+	errMsg *string,
+) error {
+	query := `
+		UPDATE jobs
+		SET status = $1,
+		    worker_id = COALESCE($2, worker_id),
+		    error_message = $3,
+		    started_at = CASE
+		        WHEN $1 = 'running' AND started_at IS NULL THEN NOW()
+		        ELSE started_at
+		    END,
+		    completed_at = CASE
+		        WHEN $1 IN ('completed', 'failed', 'cancelled') AND completed_at IS NULL THEN NOW()
+		        ELSE completed_at
+		    END
+		WHERE id = $4
+		  AND status = ANY($5)
+	`
+
+	result, err := r.db.ExecContext(
+		ctx,
+		query,
+		to,
+		workerID,
+		errMsg,
+		id,
+		pq.Array(statusStrings(from)),
+	)
+	if err != nil {
+		return err
+	}
+
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rows == 0 {
+		return domainjob.ErrInvalidStatusTransition
+	}
+
+	return nil
+}
+
+func statusStrings(statuses []domainjob.Status) []string {
+	out := make([]string, 0, len(statuses))
+	for _, status := range statuses {
+		out = append(out, string(status))
+	}
+	return out
+}
+
 func (r *JobRepository) IncrementRetryCount(ctx context.Context, id string, errMsg string) error {
 	query := `
 		UPDATE jobs
