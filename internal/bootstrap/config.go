@@ -30,6 +30,11 @@ type PostgresConfig struct {
 	SSLMode  string `yaml:"sslmode"`
 }
 
+type RedisConfig struct {
+	Host string `yaml:"host"`
+	Port int    `yaml:"port"`
+}
+
 func LoadConfig(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -67,4 +72,8 @@ func (c PostgresConfig) DSN() string {
 		c.Database,
 		c.SSLMode,
 	)
+}
+
+func (c RedisConfig) Address() string {
+	return fmt.Sprintf("%s:%d", c.Host, c.Port)
 }

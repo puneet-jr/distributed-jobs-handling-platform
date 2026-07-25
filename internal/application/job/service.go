@@ -10,12 +10,17 @@ import (
 )
 
 type Service struct {
-	repo domainjob.Repository
+	repo  domainjob.Repository
+	queue Queue
 }
 
-func NewService(repo domainjob.Repository) *Service {
-	return &Service{repo: repo}
+func NewService(repo domainjob.Repository, queue Queue) *Service {
+	return &Service{
+		repo:  repo,
+		queue: queue,
+	}
 }
+
 
 func (s *Service) Create(ctx context.Context, in CreateJobRequest) (*CreateJobResponse, error) {
 	if in.Type == "" {
@@ -48,14 +53,37 @@ func (s *Service) Create(ctx context.Context, in CreateJobRequest) (*CreateJobRe
 		CreatedAt:      now,
 	}
 
-	if err := s.repo.Create(ctx,job); err != nil {
-		return nil,err
+	if err := s.repo.Create(ctx, job); err != nil {
+		if errors.Is(err, domainjob.ErrDuplicateIdempotencyKey) && in.IdempotencyKey != "" {
+			existing, lookupErr := s.repo.GetByIdempotencyKey(ctx, in.IdempotencyKey)
+			if lookupErr != nil {
+				return nil, lookupErr
+			}
+	
+			return &CreateJobResponse{
+				JobID:  existing.ID,
+				Status: existing.Status,
+			}, nil
+		}
+	
+		return nil, err
 	}
-
-	return &CreateJobResponse{
+	
+	// Why enqueue AFTER database insert?
+	// Workers must never receive a job that does not exist in Postgres.
+	// The safe order is: persist first, then publish the job ID.
+	if err := s.queue.Enqueue(ctx, QueueMessage{
 		JobID: job.ID,
+		Type:  job.Type,
+	}); err != nil {
+		return nil, err
+	}
+	
+	return &CreateJobResponse{
+		JobID:  job.ID,
 		Status: job.Status,
-	},nil
+	}, nil
+
 }
 
 func (s *Service) GetByIdD(ctx context.Context, id string) (*GetJobResponse, error) {

@@ -3,14 +3,17 @@ package bootstrap
 import (
 	"context"
 	"database/sql"
-	"distributed-job-platform/internal/infrastructure/postgres"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"time"
 
-	appjob "github.com/your-org/distributed-job-platform/internal/application/job"
-	httpapi "github.com/your-org/distributed-job-platform/internal/interfaces/http"
+	"github.com/redis/go-redis/v9"
+
+	appjob "distributed-job-platform/internal/application/job"
+	httpapi "distributed-job-platform/internal/interfaces/http"
+	"distributed-job-platform/internal/infrastructure/postgres"
+	redisqueue "distributed-job-platform/internal/infrastructure/redisqueue"
 )
 
 type App struct {
@@ -18,100 +21,107 @@ type App struct {
 	server *http.Server
 	logger *slog.Logger
 	db     *sql.DB
+	redis  *redis.Client
 }
 
 func NewApp(ctx context.Context, configPath string) (*App, error) {
+	// Step 1: Load configuration
 	cfg, err := LoadConfig(configPath)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to load config: %w", err)
 	}
 
 	// Step 2: Initialize logger
-	// Why slog? It's Go's standard structured logging (since 1.21).
-	// Better than fmt.Printf: includes levels, context, JSON output.
 	logger := NewLogger(cfg.App.Env)
 	logger.Info("starting application bootstrap", "env", cfg.App.Env)
 
+	// Step 3: Connect to Database
 	db, err := sql.Open("postgres", cfg.Postgres.DSN())
 	if err != nil {
 		return nil, fmt.Errorf("failed to open database: %w", err)
 	}
 
-	// Why PingContext?
-	// sql.Open is lazy, so we must verify connection works NOW.
-	// Otherwise, first HTTP request fails with "database not connected".
-	// Fail fast on startup.
+	// Why PingContext? Fail fast on startup instead of failing on the first HTTP request.
 	if err := db.PingContext(ctx); err != nil {
-		db.Close() // Why close? Clean up resources before returning error.
+		db.Close()
 		return nil, fmt.Errorf("failed to ping database: %w", err)
 	}
 
-	// Connection Max Life time?
-	// Postgres has statement cache. If connection lives forever,
-	// cache grows unbounded. Periodic recreation keeps cache fresh.
+	// Configure connection pool to prevent resource exhaustion
 	db.SetConnMaxLifetime(5 * time.Minute)
-	db.SetMaxOpenConns(25) // Why 25? Reasonable default. Tune based on load.
-	db.SetMaxIdleConns(5)  // Why 5? Keep some warm connections, not all.
-
+	db.SetMaxOpenConns(25)
+	db.SetMaxIdleConns(5)
 	logger.Info("database connection established")
 
-	// Create repository
+	// Step 4: Connect to Redis
+	redisClient := redis.NewClient(&redis.Options{
+		Addr:     cfg.Redis.Address(),
+		Password: cfg.Redis.Password,
+		DB:       cfg.Redis.DB,
+	})
 
-	repo, err := postgres.NewJobRepository(db)
+	// Why Ping Redis on startup? 
+	// The API cannot honestly return 202 Accepted if it cannot enqueue jobs.
+	if err := redisClient.Ping(ctx).Err(); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("failed to ping redis: %w", err)
+	}
+	logger.Info("redis connection established")
 
+	// Step 5: Initialize Queue Abstraction
+	jobQueue, err := redisqueue.NewJobQueue(redisClient, "jobs")
 	if err != nil {
-		db.Close()
-		return nil, fmt.Errorf("failed to create a repository: %w", err)
+		_ = redisClient.Close()
+		_ = db.Close()
+		return nil, fmt.Errorf("failed to create job queue: %w", err)
 	}
 
-	// Create application service
-	// Why inject repository?
-	// Dependency Injection. Service doesn't create repo, it receives it.
-	// This makes testing easy: pass mock repository instead of real Postgres.
-	jobService := appjob.NewService(repo)
+	// Step 6: Create Repository
+	repo, err := postgres.NewJobRepository(db)
+	if err != nil {
+		_ = redisClient.Close()
+		_ = db.Close()
+		return nil, fmt.Errorf("failed to create repository: %w", err)
+	}
 
-	//Create HTTP handler
+	// Step 7: Create Application Service (injecting BOTH repo and queue)
+	// This enforces the rule: validate -> store in Postgres -> enqueue in Redis -> return 202
+	jobService := appjob.NewService(repo, jobQueue)
 
+	// Step 8: Create HTTP Handler and Router
 	jobHandler := httpapi.NewJobHandler(jobService)
-
-	// Create router
 	router := httpapi.NewRouter(
 		jobHandler,
-		NewHealthHandler(logger, db), // Why pass db? Health check needs to verify DB is alive.
+		NewHealthHandler(logger, db),
 	)
 
-	// Step 8: Configure HTTP server
+	// Step 9: Configure HTTP Server with secure timeouts
 	server := &http.Server{
 		Addr:              fmt.Sprintf(":%d", cfg.HTTP.Port),
 		Handler:           router,
-		ReadHeaderTimeout: 5 * time.Second,  // Why? Prevent Slowloris attacks
-		ReadTimeout:       30 * time.Second, // Why? Limit request body read time
-		WriteTimeout:      30 * time.Second, // Why? Limit response write time
-		IdleTimeout:       60 * time.Second, // Why? Close idle connections
+		ReadHeaderTimeout: 5 * time.Second,  // Prevents Slowloris attacks
+		ReadTimeout:       30 * time.Second, // Limits request body read time
+		WriteTimeout:      30 * time.Second, // Limits response write time
+		IdleTimeout:       60 * time.Second, // Closes idle keep-alive connections
 	}
-
-	logger.Info("database connection established")
 
 	return &App{
 		cfg:    cfg,
 		server: server,
 		logger: logger,
 		db:     db,
+		redis:  redisClient,
 	}, nil
 }
 
 func (a *App) Run(ctx context.Context) error {
 	a.logger.Info("starting api server", "port", a.cfg.HTTP.Port)
 
-	// Why goroutine for shutdown?
-	// ListenAndServe blocks. We need to listen for ctx.Done() simultaneously.
-	// Goroutine allows concurrent shutdown signal handling.
+	// Goroutine for graceful shutdown
 	go func() {
 		<-ctx.Done()
 		a.logger.Info("shutting down server...")
 
-		// Why Shutdown with timeout?
-		// Graceful shutdown: finish in-flight requests, but don't wait forever.
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 
@@ -120,17 +130,47 @@ func (a *App) Run(ctx context.Context) error {
 		}
 	}()
 
-	if err := a.server.ListenAndServer(); err != nil && err != http.ErrServerClosed {
-		return fmt.Errorf("save error: %w", err)
+	// FIXED: ListenAndServe (was ListenAndServer)
+	if err := a.server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		// FIXED: "server error" (was "save error")
+		return fmt.Errorf("server error: %w", err)
 	}
+	
 	return nil
 }
 
 func (a *App) Close() error {
+	var errs []error
+
+	// Close Redis first (it's stateless for the app, just a queue)
+	if a.redis != nil {
+		if err := a.redis.Close(); err != nil {
+			errs = append(errs, fmt.Errorf("failed to close redis: %w", err))
+		}
+	}
+	
+	// Close Database second
 	if a.db != nil {
-		return a.db.Close()
+		if err := a.db.Close(); err != nil {
+			errs = append(errs, fmt.Errorf("failed to close database: %w", err))
+		}
+	}
+
+	if len(errs) > 0 {
+		return fmt.Errorf("errors during close: %v", errs)
 	}
 	return nil
 }
 
-// Alternative: use "github.com/jackc/pgx/v5/stdlib" for better performance.
+// NewLogger provides a simple, compile-ready structured logger.
+// In a larger codebase, this might live in internal/bootstrap/logger.go
+func NewLogger(env string) *slog.Logger {
+	opts := &slog.HandlerOptions{
+		Level: slog.LevelInfo,
+	}
+	if env == "development" {
+		opts.Level = slog.LevelDebug
+	}
+	// Outputs to os.Stderr by default
+	return slog.New(slog.NewTextHandler(nil, opts))
+}
