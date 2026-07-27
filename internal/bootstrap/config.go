@@ -11,6 +11,7 @@ type Config struct {
 	App      AppConfig      `yaml:"app"`
 	HTTP     HTTPConfig     `yaml:"http"`
 	Postgres PostgresConfig `yaml:"postgres"`
+	Redis    RedisConfig    `yaml:"redis"`
 }
 
 type AppConfig struct {
@@ -31,8 +32,10 @@ type PostgresConfig struct {
 }
 
 type RedisConfig struct {
-	Host string `yaml:"host"`
-	Port int    `yaml:"port"`
+	Host     string `yaml:"host"`
+	Port     int    `yaml:"port"`
+	Password string `yaml:"password"`
+	DB       int    `yaml:"db"`
 }
 
 func LoadConfig(path string) (*Config, error) {
@@ -57,6 +60,12 @@ func LoadConfig(path string) (*Config, error) {
 	}
 	if cfg.Postgres.SSLMode == "" {
 		cfg.Postgres.SSLMode = "disable"
+	}
+	if cfg.Redis.Host == "" {
+		return nil, fmt.Errorf("redis.host is required")
+	}
+	if cfg.Redis.Port == 0 {
+		cfg.Redis.Port = 6379
 	}
 
 	return &cfg, nil

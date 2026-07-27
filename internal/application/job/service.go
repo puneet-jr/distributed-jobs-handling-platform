@@ -3,18 +3,21 @@ package job
 import (
 	"context"
 	"errors"
+	"math"
 	"time"
 
-	"github.com/google/uuid"
 	domainjob "distributed-job-platform/internal/domain/job"
+	"github.com/google/uuid"
 )
+
+var ErrAlreadyClaimed = errors.New("job is not claimable")
 
 type Service struct {
 	repo  domainjob.Repository
-	queue domainjob.Queue // FIX 1: Added domainjob prefix
+	queue domainjob.Queue
 }
 
-func NewService(repo domainjob.Repository, queue domainjob.Queue) *Service { // FIX 1: Added domainjob prefix
+func NewService(repo domainjob.Repository, queue domainjob.Queue) *Service {
 	return &Service{
 		repo:  repo,
 		queue: queue,
@@ -36,6 +39,9 @@ func (s *Service) Create(ctx context.Context, in CreateJobRequest) (*CreateJobRe
 				JobID:  existing.ID,
 				Status: existing.Status,
 			}, nil
+		}
+		if err != nil && !errors.Is(err, domainjob.ErrJobNotFound) {
+			return nil, err
 		}
 	}
 
@@ -68,7 +74,10 @@ func (s *Service) Create(ctx context.Context, in CreateJobRequest) (*CreateJobRe
 		return nil, err
 	}
 
-	// FIX 2: Added domainjob prefix to QueueMessage
+	if s.queue == nil {
+		return nil, errors.New("job queue is required")
+	}
+
 	if err := s.queue.Enqueue(ctx, domainjob.QueueMessage{
 		JobID: job.ID,
 		Type:  job.Type,
@@ -111,17 +120,13 @@ func (s *Service) MarkRunning(
 		return errors.New("worker id is required")
 	}
 
-	return s.repo.UpdateStatusIfCurrent(
-		ctx,
-		id,
-		[]domainjob.Status{
-			domainjob.StatusPending,
-			domainjob.StatusRetrying,
-		},
-		domainjob.StatusRunning,
-		&workerID,
-		nil,
-	)
+	if err := s.repo.ClaimRunnable(ctx, id, workerID); err != nil {
+		if errors.Is(err, domainjob.ErrInvalidStatusTransition) {
+			return ErrAlreadyClaimed
+		}
+		return err
+	}
+	return nil
 }
 
 func (s *Service) MarkCompleted(ctx context.Context, id string, workerID string) error {
@@ -189,20 +194,8 @@ func (s *Service) MarkRetrying(
 		return s.MarkFailed(ctx, id, workerID, errMsg)
 	}
 
-	if err := s.repo.IncrementRetryCount(ctx, id, errMsg); err != nil {
-		return err
-	}
-
-	return s.repo.UpdateStatusIfCurrent(
-		ctx,
-		id,
-		[]domainjob.Status{
-			domainjob.StatusRunning,
-		},
-		domainjob.StatusPending,
-		&workerID,
-		&errMsg,
-	)
+	nextRunAt := time.Now().UTC().Add(retryBackoff(job.RetryCount + 1))
+	return s.repo.ScheduleRetry(ctx, id, workerID, errMsg, nextRunAt)
 }
 
 func (s *Service) Cancel(ctx context.Context, id string) error {
@@ -218,4 +211,60 @@ func (s *Service) Cancel(ctx context.Context, id string) error {
 		nil,
 		nil,
 	)
+}
+
+func (s *Service) RequeueRunnableRetries(ctx context.Context, limit int) (int, error) {
+	if s.queue == nil {
+		return 0, errors.New("job queue is required")
+	}
+	if limit <= 0 {
+		limit = 100
+	}
+
+	jobs, err := s.repo.ListRunnableRetries(ctx, limit)
+	if err != nil {
+		return 0, err
+	}
+
+	for _, job := range jobs {
+		if err := s.queue.Enqueue(ctx, domainjob.QueueMessage{JobID: job.ID, Type: job.Type}); err != nil {
+			return 0, err
+		}
+	}
+
+	return len(jobs), nil
+}
+
+func (s *Service) ReclaimStaleRunning(ctx context.Context, staleBefore time.Time, limit int) (int, error) {
+	if s.queue == nil {
+		return 0, errors.New("job queue is required")
+	}
+	if limit <= 0 {
+		limit = 100
+	}
+
+	jobs, err := s.repo.ReclaimStaleRunning(ctx, staleBefore, limit)
+	if err != nil {
+		return 0, err
+	}
+
+	for _, job := range jobs {
+		if err := s.queue.Enqueue(ctx, domainjob.QueueMessage{JobID: job.ID, Type: job.Type}); err != nil {
+			return 0, err
+		}
+	}
+
+	return len(jobs), nil
+}
+
+func retryBackoff(attempt int) time.Duration {
+	if attempt < 1 {
+		attempt = 1
+	}
+	seconds := math.Pow(2, float64(attempt-1))
+	backoff := time.Duration(seconds) * time.Second
+	if backoff > 5*time.Minute {
+		return 5 * time.Minute
+	}
+	return backoff
 }

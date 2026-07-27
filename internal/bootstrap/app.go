@@ -11,9 +11,9 @@ import (
 	"github.com/redis/go-redis/v9"
 
 	appjob "distributed-job-platform/internal/application/job"
-	httpapi "distributed-job-platform/internal/interfaces/http"
 	"distributed-job-platform/internal/infrastructure/postgres"
 	redisqueue "distributed-job-platform/internal/infrastructure/redisqueue"
+	httpapi "distributed-job-platform/internal/interfaces/http"
 )
 
 type App struct {
@@ -60,7 +60,7 @@ func NewApp(ctx context.Context, configPath string) (*App, error) {
 		DB:       cfg.Redis.DB,
 	})
 
-	// Why Ping Redis on startup? 
+	// Why Ping Redis on startup?
 	// The API cannot honestly return 202 Accepted if it cannot enqueue jobs.
 	if err := redisClient.Ping(ctx).Err(); err != nil {
 		_ = db.Close()
@@ -135,7 +135,7 @@ func (a *App) Run(ctx context.Context) error {
 		// FIXED: "server error" (was "save error")
 		return fmt.Errorf("server error: %w", err)
 	}
-	
+
 	return nil
 }
 
@@ -148,7 +148,7 @@ func (a *App) Close() error {
 			errs = append(errs, fmt.Errorf("failed to close redis: %w", err))
 		}
 	}
-	
+
 	// Close Database second
 	if a.db != nil {
 		if err := a.db.Close(); err != nil {
@@ -160,17 +160,4 @@ func (a *App) Close() error {
 		return fmt.Errorf("errors during close: %v", errs)
 	}
 	return nil
-}
-
-// NewLogger provides a simple, compile-ready structured logger.
-// In a larger codebase, this might live in internal/bootstrap/logger.go
-func NewLogger(env string) *slog.Logger {
-	opts := &slog.HandlerOptions{
-		Level: slog.LevelInfo,
-	}
-	if env == "development" {
-		opts.Level = slog.LevelDebug
-	}
-	// Outputs to os.Stderr by default
-	return slog.New(slog.NewTextHandler(nil, opts))
 }

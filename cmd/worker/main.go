@@ -89,14 +89,20 @@ func main() {
 		os.Exit(1)
 	}
 
+	producer, err := redisqueue.NewJobQueue(redisClient, stream)
+	if err != nil {
+		logger.Error("failed to create queue producer", "error", err)
+		os.Exit(1)
+	}
+
 	repo, err := postgres.NewJobRepository(db)
 	if err != nil {
 		logger.Error("failed to create job repository", "error", err)
 		os.Exit(1)
 	}
 
-	// Worker only reads/transitions jobs, never creates them.
-	jobService := appjob.NewService(repo, nil)
+	// Worker uses the queue only for recovery/retry re-enqueue, not job creation.
+	jobService := appjob.NewService(repo, producer)
 
 	workerID := os.Getenv("WORKER_ID")
 	if workerID == "" {

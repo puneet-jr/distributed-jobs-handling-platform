@@ -1,6 +1,9 @@
 package job
 
-import "time"
+import (
+	"context"
+	"time"
+)
 
 type Job struct {
 	ID             string
@@ -14,6 +17,16 @@ type Job struct {
 	ErrorMessage   *string
 	WorkerID       *string
 	CreatedAt      time.Time
+	NextRunAt      *time.Time
 	StartedAt      *time.Time
 	CompletedAt    *time.Time
+}
+
+type QueueMessage struct {
+	JobID string
+	Type  string
+}
+
+type Queue interface {
+	Enqueue(ctx context.Context, msg QueueMessage) error
 }

@@ -3,14 +3,13 @@ package job
 type Status string
 
 const (
-		StatusPending   Status = "pending"
-		StatusRunning   Status = "running"
-		StatusCompleted Status = "completed"
-		StatusFailed    Status = "failed"
-		StatusRetrying  Status = "retrying"
-		StatusCancelled Status = "cancelled"
+	StatusPending   Status = "pending"
+	StatusRunning   Status = "running"
+	StatusCompleted Status = "completed"
+	StatusFailed    Status = "failed"
+	StatusRetrying  Status = "retrying"
+	StatusCancelled Status = "cancelled"
 )
-
 
 func (s Status) IsTerminal() bool {
 	return s == StatusCompleted ||
@@ -24,25 +23,25 @@ func CanTransition(from Status, to Status) bool {
 	}
 
 	switch from {
-		case StatusPending:
+	case StatusPending:
 		return to == StatusRunning || to == StatusCancelled
 
-		case StatusRunning:
-				return to == StatusCompleted ||
-					to == StatusFailed ||
-					to == StatusRetrying ||
-					to == StatusCancelled
-		
-			case StatusRetrying:
-				return to == StatusPending ||
-					to == StatusRunning ||
-					to == StatusFailed ||
-					to == StatusCancelled
-		
-			case StatusCompleted, StatusFailed, StatusCancelled:
-				return false
-		
-			default:
-				return false
+	case StatusRunning:
+		return to == StatusCompleted ||
+			to == StatusFailed ||
+			to == StatusRetrying ||
+			to == StatusCancelled
+
+	case StatusRetrying:
+		return to == StatusPending ||
+			to == StatusRunning ||
+			to == StatusFailed ||
+			to == StatusCancelled
+
+	case StatusCompleted, StatusFailed, StatusCancelled:
+		return false
+
+	default:
+		return false
 	}
 }

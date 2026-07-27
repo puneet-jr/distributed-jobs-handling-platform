@@ -1,4 +1,4 @@
-papackage worker
+package workers
 
 import (
 	"context"
@@ -82,6 +82,8 @@ func (w *Worker) Run(ctx context.Context) error {
 		}(i)
 	}
 
+	go w.recoveryLoop(ctx)
+
 	// Poll loop reads from Redis in batches and feeds the bounded channel.
 	for {
 		select {
@@ -90,7 +92,7 @@ func (w *Worker) Run(ctx context.Context) error {
 			wg.Wait()
 			return ctx.Err()
 		default:
-			messages, err := w.queue.Read(ctx, w.id, w.batchSize)
+			messages, err := w.readMessages(ctx)
 			if err != nil {
 				w.logger.Error("queue read failed", "error", err)
 
@@ -115,6 +117,45 @@ func (w *Worker) Run(ctx context.Context) error {
 					wg.Wait()
 					return ctx.Err()
 				}
+			}
+		}
+	}
+}
+
+func (w *Worker) readMessages(ctx context.Context) ([]Message, error) {
+	if reclaimer, ok := w.queue.(PendingReclaimer); ok {
+		messages, err := reclaimer.Reclaim(ctx, w.id, 2*time.Minute, w.batchSize)
+		if err != nil {
+			w.logger.Error("queue reclaim failed", "error", err)
+		}
+		if len(messages) > 0 {
+			return messages, nil
+		}
+	}
+
+	return w.queue.Read(ctx, w.id, w.batchSize)
+}
+
+func (w *Worker) recoveryLoop(ctx context.Context) {
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if n, err := w.service.RequeueRunnableRetries(ctx, w.batchSize); err != nil {
+				w.logger.Error("failed to requeue runnable retries", "error", err)
+			} else if n > 0 {
+				w.logger.Info("requeued runnable retries", "count", n)
+			}
+
+			staleBefore := time.Now().UTC().Add(-10 * time.Minute)
+			if n, err := w.service.ReclaimStaleRunning(ctx, staleBefore, w.batchSize); err != nil {
+				w.logger.Error("failed to reclaim stale running jobs", "error", err)
+			} else if n > 0 {
+				w.logger.Info("reclaimed stale running jobs", "count", n)
 			}
 		}
 	}
@@ -205,7 +246,7 @@ func (w *Worker) processMessage(ctx context.Context, slot int, msg Message) {
 		return
 	}
 
-	job, err := w.service.GetByID(ctx, msg.JobID)
+	job, err := w.service.GetDomainJobByID(ctx, msg.JobID)
 	if err != nil {
 		logger.Error("failed to load job", "error", err)
 		return
@@ -219,9 +260,6 @@ func (w *Worker) processMessage(ctx context.Context, slot int, msg Message) {
 		return
 	}
 
-	domainJob := job.ToDomain()
-
-	// NOTE (contract, not a code fix): handler.Handle MUST be idempotent.
 	// Ack happens only after MarkCompleted succeeds (see below), so a
 	// crash between those two calls WILL cause this exact job to be
 	// redelivered and re-executed. Any handler that isn't safe to run
@@ -229,7 +267,7 @@ func (w *Worker) processMessage(ctx context.Context, slot int, msg Message) {
 	// latent bug in this system, not an edge case - at-least-once
 	// delivery guarantees this will happen eventually at scale. Enforce
 	// this at the Handler interface/documentation level, not here.
-	if err := handler.Handle(ctx, domainJob); err != nil {
+	if err := handler.Handle(ctx, *job); err != nil {
 		// Handler failed, so we schedule retry through service rules.
 		// ACK happens after retry state is safely recorded.
 		_ = w.service.MarkRetrying(ctx, msg.JobID, w.id, err.Error())

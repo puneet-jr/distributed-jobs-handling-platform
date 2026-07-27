@@ -1,6 +1,6 @@
 package job
 
-import domainjob "github.com/your-org/distributed-job-platform/internal/domain/job"
+import domainjob "distributed-job-platform/internal/domain/job"
 
 type CreateJobRequest struct {
 	Type           string

@@ -4,8 +4,8 @@ import (
 	"encoding/json"
 	"net/http"
 
-	appjob "github.com/your-org/distributed-job-platform/internal/application/job"
-	"github.com/your-org/distributed-job-platform/internal/shared/response"
+	appjob "distributed-job-platform/internal/application/job"
+	"distributed-job-platform/internal/shared/response"
 )
 
 type JobHandler struct {
@@ -46,13 +46,6 @@ func (h *JobHandler) CreateJob(w http.ResponseWriter, r *http.Request) {
 		IdempotencyKey: idempotencyKey,
 	})
 	if err != nil {
-		// Why check for duplicate?
-		// Duplicate idempotency key is not an error - it's expected behavior.
-		// Return 200 OK with existing job, not 409 Conflict.
-		if err == appjob.ErrDuplicateIdempotencyKey {
-			// This case is handled in service.Create - it returns existing job
-			// So we won't reach here with this error.
-		}
 		response.Error(w, http.StatusBadRequest, err.Error())
 		return
 	}

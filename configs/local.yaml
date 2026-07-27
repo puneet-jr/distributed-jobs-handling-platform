@@ -1,0 +1,19 @@
+app:
+  env: local
+
+http:
+  port: 8080
+
+postgres:
+  host: localhost
+  port: 5432
+  user: jobs
+  password: jobs
+  database: jobs
+  sslmode: disable
+
+redis:
+  host: localhost
+  port: 6379
+  password: ""
+  db: 0
