@@ -6,21 +6,20 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	domainjob "github.com/your-org/distributed-job-platform/internal/domain/job"
+	domainjob "distributed-job-platform/internal/domain/job"
 )
 
 type Service struct {
 	repo  domainjob.Repository
-	queue Queue
+	queue domainjob.Queue // FIX 1: Added domainjob prefix
 }
 
-func NewService(repo domainjob.Repository, queue Queue) *Service {
+func NewService(repo domainjob.Repository, queue domainjob.Queue) *Service { // FIX 1: Added domainjob prefix
 	return &Service{
 		repo:  repo,
 		queue: queue,
 	}
 }
-
 
 func (s *Service) Create(ctx context.Context, in CreateJobRequest) (*CreateJobResponse, error) {
 	if in.Type == "" {
@@ -59,36 +58,32 @@ func (s *Service) Create(ctx context.Context, in CreateJobRequest) (*CreateJobRe
 			if lookupErr != nil {
 				return nil, lookupErr
 			}
-	
+
 			return &CreateJobResponse{
 				JobID:  existing.ID,
 				Status: existing.Status,
 			}, nil
 		}
-	
+
 		return nil, err
 	}
-	
-	// Why enqueue AFTER database insert?
-	// Workers must never receive a job that does not exist in Postgres.
-	// The safe order is: persist first, then publish the job ID.
-	if err := s.queue.Enqueue(ctx, QueueMessage{
+
+	// FIX 2: Added domainjob prefix to QueueMessage
+	if err := s.queue.Enqueue(ctx, domainjob.QueueMessage{
 		JobID: job.ID,
 		Type:  job.Type,
 	}); err != nil {
 		return nil, err
 	}
-	
+
 	return &CreateJobResponse{
 		JobID:  job.ID,
 		Status: job.Status,
 	}, nil
-
 }
 
-func (s *Service) GetByIdD(ctx context.Context, id string) (*GetJobResponse, error) {
-	job, err := s.repo.GetByID(ctx,id)
-
+func (s *Service) GetByID(ctx context.Context, id string) (*GetJobResponse, error) {
+	job, err := s.repo.GetByID(ctx, id)
 	if err != nil {
 		return nil, err
 	}
@@ -101,6 +96,10 @@ func (s *Service) GetByIdD(ctx context.Context, id string) (*GetJobResponse, err
 		RetryCount:   job.RetryCount,
 		ErrorMessage: job.ErrorMessage,
 	}, nil
+}
+
+func (s *Service) GetDomainJobByID(ctx context.Context, id string) (*domainjob.Job, error) {
+	return s.repo.GetByID(ctx, id)
 }
 
 func (s *Service) MarkRunning(
@@ -198,7 +197,7 @@ func (s *Service) MarkRetrying(
 		ctx,
 		id,
 		[]domainjob.Status{
-			domainjob.StatusRetrying,
+			domainjob.StatusRunning,
 		},
 		domainjob.StatusPending,
 		&workerID,
@@ -220,4 +219,3 @@ func (s *Service) Cancel(ctx context.Context, id string) error {
 		nil,
 	)
 }
-
