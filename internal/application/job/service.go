@@ -3,7 +3,6 @@ package job
 import (
 	"context"
 	"errors"
-	"math"
 	"time"
 
 	domainjob "distributed-job-platform/internal/domain/job"
@@ -17,11 +16,19 @@ type Service struct {
 	queue domainjob.Queue
 }
 
-func NewService(repo domainjob.Repository, queue domainjob.Queue) *Service {
+// 1. Constructor with validation
+func NewService(repo domainjob.Repository, queue domainjob.Queue) (*Service, error) {
+	if repo == nil {
+		return nil, errors.New("repository is required")
+	}
+	if queue == nil {
+		return nil, errors.New("queue is required")
+	}
+
 	return &Service{
 		repo:  repo,
 		queue: queue,
-	}
+	}, nil
 }
 
 func (s *Service) Create(ctx context.Context, in CreateJobRequest) (*CreateJobResponse, error) {
@@ -74,10 +81,7 @@ func (s *Service) Create(ctx context.Context, in CreateJobRequest) (*CreateJobRe
 		return nil, err
 	}
 
-	if s.queue == nil {
-		return nil, errors.New("job queue is required")
-	}
-
+	// 2. Removed s.queue == nil check (guaranteed by constructor)
 	if err := s.queue.Enqueue(ctx, domainjob.QueueMessage{
 		JobID: job.ID,
 		Type:  job.Type,
@@ -111,11 +115,7 @@ func (s *Service) GetDomainJobByID(ctx context.Context, id string) (*domainjob.J
 	return s.repo.GetByID(ctx, id)
 }
 
-func (s *Service) MarkRunning(
-	ctx context.Context,
-	id string,
-	workerID string,
-) error {
+func (s *Service) MarkRunning(ctx context.Context, id string, workerID string) error {
 	if workerID == "" {
 		return errors.New("worker id is required")
 	}
@@ -129,6 +129,7 @@ func (s *Service) MarkRunning(
 	return nil
 }
 
+// 3. Kept Option 2's MarkCompleted (generic repository approach)
 func (s *Service) MarkCompleted(ctx context.Context, id string, workerID string) error {
 	if workerID == "" {
 		return errors.New("worker id is required")
@@ -146,12 +147,8 @@ func (s *Service) MarkCompleted(ctx context.Context, id string, workerID string)
 	)
 }
 
-func (s *Service) MarkFailed(
-	ctx context.Context,
-	id string,
-	workerID string,
-	errMsg string,
-) error {
+// 4. Kept MarkFailed
+func (s *Service) MarkFailed(ctx context.Context, id string, workerID string, errMsg string) error {
 	if workerID == "" {
 		return errors.New("worker id is required")
 	}
@@ -172,12 +169,8 @@ func (s *Service) MarkFailed(
 	)
 }
 
-func (s *Service) MarkRetrying(
-	ctx context.Context,
-	id string,
-	workerID string,
-	errMsg string,
-) error {
+// 10. Kept MarkRetrying (now uses improved retryBackoff)
+func (s *Service) MarkRetrying(ctx context.Context, id string, workerID string, errMsg string) error {
 	if workerID == "" {
 		return errors.New("worker id is required")
 	}
@@ -198,6 +191,7 @@ func (s *Service) MarkRetrying(
 	return s.repo.ScheduleRetry(ctx, id, workerID, errMsg, nextRunAt)
 }
 
+// 5. Kept Cancel
 func (s *Service) Cancel(ctx context.Context, id string) error {
 	return s.repo.UpdateStatusIfCurrent(
 		ctx,
@@ -214,9 +208,7 @@ func (s *Service) Cancel(ctx context.Context, id string) error {
 }
 
 func (s *Service) RequeueRunnableRetries(ctx context.Context, limit int) (int, error) {
-	if s.queue == nil {
-		return 0, errors.New("job queue is required")
-	}
+	// 2. Removed s.queue == nil check
 	if limit <= 0 {
 		limit = 100
 	}
@@ -236,9 +228,7 @@ func (s *Service) RequeueRunnableRetries(ctx context.Context, limit int) (int, e
 }
 
 func (s *Service) ReclaimStaleRunning(ctx context.Context, staleBefore time.Time, limit int) (int, error) {
-	if s.queue == nil {
-		return 0, errors.New("job queue is required")
-	}
+	// 2. Removed s.queue == nil check
 	if limit <= 0 {
 		limit = 100
 	}
@@ -257,14 +247,17 @@ func (s *Service) ReclaimStaleRunning(ctx context.Context, staleBefore time.Time
 	return len(jobs), nil
 }
 
+// 8. Replaced math.Pow with bit-shifting (requires Go 1.21+ for built-in min)
 func retryBackoff(attempt int) time.Duration {
 	if attempt < 1 {
 		attempt = 1
 	}
-	seconds := math.Pow(2, float64(attempt-1))
-	backoff := time.Duration(seconds) * time.Second
+
+	backoff := time.Second << min(attempt-1, 8)
+
 	if backoff > 5*time.Minute {
 		return 5 * time.Minute
 	}
+
 	return backoff
 }

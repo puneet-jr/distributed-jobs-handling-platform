@@ -1,6 +1,6 @@
 module distributed-job-platform
 
-go 1.24
+go 1.25.0
 
 require (
 	github.com/google/uuid v1.6.0
@@ -11,5 +11,6 @@ require (
 
 require (
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
+	github.com/prometheus/client_golang v1.24.1 // indirect
 	go.uber.org/atomic v1.11.0 // indirect
 )

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"time"
+	"strings"
 
 	domainjob "distributed-job-platform/internal/domain/job"
 	"distributed-job-platform/internal/workers"
@@ -86,7 +87,7 @@ func EnsureConsumerGroup(ctx context.Context, client *redis.Client, stream strin
 	}
 
 	err := client.XGroupCreateMkStream(ctx, stream, group, "0").Err()
-	if err != nil && !errors.Is(err, redis.BusyGroupErr) {
+	if err != nil && !strings.Contains(err.Error(), "BUSYGROUP") {
 		return fmt.Errorf("create consumer group: %w", err)
 	}
 	return nil
