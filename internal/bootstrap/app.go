@@ -8,12 +8,15 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/redis/go-redis/v9"
 
 	appjob "distributed-job-platform/internal/application/job"
 	"distributed-job-platform/internal/infrastructure/postgres"
 	redisqueue "distributed-job-platform/internal/infrastructure/redisqueue"
 	httpapi "distributed-job-platform/internal/interfaces/http"
+	"distributed-job-platform/internal/observability"
 )
 
 type App struct {
@@ -84,18 +87,25 @@ func NewApp(ctx context.Context, configPath string) (*App, error) {
 		return nil, fmt.Errorf("failed to create repository: %w", err)
 	}
 
-	// Step 7: Create Application Service (injecting BOTH repo and queue)
-	// This enforces the rule: validate -> store in Postgres -> enqueue in Redis -> return 202
-	jobService := appjob.NewService(repo, jobQueue)
+	// Step 7: Initialize Prometheus metrics
+	// A dedicated registry (instead of the global default) keeps this
+	// process's metrics isolated and testable.
+	registry := prometheus.NewRegistry()
+	metrics := observability.NewMetrics(registry)
 
-	// Step 8: Create HTTP Handler and Router
+	// Step 8: Create Application Service (injecting repo, queue, AND metrics)
+	// This enforces the rule: validate -> store in Postgres -> enqueue in Redis -> return 202
+	jobService := appjob.NewService(repo, jobQueue, metrics)
+
+	// Step 9: Create HTTP Handler and Router
 	jobHandler := httpapi.NewJobHandler(jobService)
 	router := httpapi.NewRouter(
 		jobHandler,
 		NewHealthHandler(logger, db),
+		promhttp.HandlerFor(registry, promhttp.HandlerOpts{}),
 	)
 
-	// Step 9: Configure HTTP Server with secure timeouts
+	// Step 10: Configure HTTP Server with secure timeouts
 	server := &http.Server{
 		Addr:              fmt.Sprintf(":%d", cfg.HTTP.Port),
 		Handler:           router,
@@ -130,9 +140,7 @@ func (a *App) Run(ctx context.Context) error {
 		}
 	}()
 
-	// FIXED: ListenAndServe (was ListenAndServer)
 	if err := a.server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-		// FIXED: "server error" (was "save error")
 		return fmt.Errorf("server error: %w", err)
 	}
 

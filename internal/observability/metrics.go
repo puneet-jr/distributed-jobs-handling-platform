@@ -81,4 +81,13 @@ func NewMetrics(reg prometheus.Registerer) *Metrics {
 		m.QueueDepth,
 		m.JobProcessingTime.(prometheus.Collector),
 		m.JobWaitTime.(prometheus.Collector),
+	)
+	return m
+}
+
+func SecondsSince( t time.Time) float64 {
+	if t.IsZero() {
+		return 0
 	}
+	return time.Since(t).Seconds()
+}
