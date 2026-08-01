@@ -1,93 +1,83 @@
+// internal/observability/metrics.go
 package observability
 
 import (
-	"time"
 	"github.com/prometheus/client_golang/prometheus"
 )
 
 type Metrics struct {
-	JobsCreated       prometheus.Counter
-	JobsStarted       prometheus.Counter
-	JobsCompleted     prometheus.Counter
-	JobsFailed        prometheus.Counter
-	JobsRetried       prometheus.Counter
-	WorkerPollErrors  prometheus.Counter
-	HandlerErrors     *prometheus.CounterVec
-	WorkerActiveJobs  prometheus.Gauge
-	QueueDepth        prometheus.Gauge
-	JobProcessingTime prometheus.Observer
-	JobWaitTime       prometheus.Observer
+	JobsCreated      *prometheus.CounterVec
+	JobsStarted      *prometheus.CounterVec
+	JobsCompleted    *prometheus.CounterVec
+	JobsFailed       *prometheus.CounterVec
+	JobsRetried      *prometheus.CounterVec
+	HandlerErrors    *prometheus.CounterVec
+	WorkerPollErrors *prometheus.CounterVec
+	WorkerActiveJobs *prometheus.GaugeVec
+	JobProcessing    *prometheus.HistogramVec
+	JobWait          *prometheus.HistogramVec
 }
 
-func NewMetrics(reg prometheus.Registerer) *Metrics {
+func NewMetrics(reg *prometheus.Registry) *Metrics {
 	m := &Metrics{
-		JobsCreated: prometheus.NewCounter(prometheus.CounterOpts{
+		JobsCreated: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "jobs_created_total",
-			Help: "Total jobs accepted by the API.",
-		}),
-		JobsStarted: prometheus.NewCounter(prometheus.CounterOpts{
+			Help: "Total jobs created.",
+		}, []string{"job_type"}),
+
+		JobsStarted: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "jobs_started_total",
 			Help: "Total jobs started by workers.",
-		}),
-		JobsCompleted: prometheus.NewCounter(prometheus.CounterOpts{
+		}, []string{"job_type", "worker_id"}),
+
+		JobsCompleted: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "jobs_completed_total",
-			Help: "Total jobs completed successfully.",
-		}),
-		JobsFailed: prometheus.NewCounter(prometheus.CounterOpts{
+			Help: "Total jobs completed.",
+		}, []string{"job_type", "worker_id"}),
+
+		JobsFailed: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "jobs_failed_total",
-			Help: "Total jobs permanently failed.",
-		}),
-		JobsRetried: prometheus.NewCounter(prometheus.CounterOpts{
+			Help: "Total jobs failed.",
+		}, []string{"job_type", "worker_id"}),
+
+		JobsRetried: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "jobs_retried_total",
 			Help: "Total jobs scheduled for retry.",
-		}),
-		WorkerPollErrors: prometheus.NewCounter(prometheus.CounterOpts{
-			Name: "worker_poll_errors_total",
-			Help: "Total worker queue polling errors.",
-		}),
+		}, []string{"job_type", "worker_id"}),
+
 		HandlerErrors: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "handler_errors_total",
-			Help: "Total handler execution errors by job type.",
-		}, []string{"job_type"}),
-		WorkerActiveJobs: prometheus.NewGauge(prometheus.GaugeOpts{
+			Help: "Total handler execution errors.",
+		}, []string{"job_type", "worker_id"}),
+
+		WorkerPollErrors: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "worker_poll_errors_total",
+			Help: "Total queue polling errors.",
+		}, []string{"worker_id"}),
+
+		WorkerActiveJobs: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Name: "worker_active_jobs",
-			Help: "Currently running worker jobs.",
-		}),
-		QueueDepth: prometheus.NewGauge(prometheus.GaugeOpts{
-			Name: "queue_depth",
-			Help: "Current queue depth.",
-		}),
-		JobProcessingTime: prometheus.NewHistogram(prometheus.HistogramOpts{
+			Help: "Current active jobs per worker.",
+		}, []string{"worker_id"}),
+
+		JobProcessing: prometheus.NewHistogramVec(prometheus.HistogramOpts{
 			Name:    "job_processing_duration_seconds",
-			Help:    "Time spent processing a job.",
+			Help:    "Time spent processing jobs.",
 			Buckets: prometheus.DefBuckets,
-		}),
-		JobWaitTime: prometheus.NewHistogram(prometheus.HistogramOpts{
+		}, []string{"job_type", "worker_id"}),
+
+		JobWait: prometheus.NewHistogramVec(prometheus.HistogramOpts{
 			Name:    "job_wait_duration_seconds",
 			Help:    "Time between job creation and worker start.",
 			Buckets: prometheus.DefBuckets,
-		}),
+		}, []string{"job_type"}),
 	}
 
-	reg.MustRegister{
+	reg.MustRegister(
 		m.JobsCreated,
 		m.JobsStarted,
 		m.JobsCompleted,
 		m.JobsFailed,
-		m.JobsRetried,
-		m.WorkerPollErrors,
-		m.HandlerErrors,
-		m.WorkerActiveJobs,
-		m.QueueDepth,
-		m.JobProcessingTime.(prometheus.Collector),
-		m.JobWaitTime.(prometheus.Collector),
 	)
 	return m
-}
-
-func SecondsSince( t time.Time) float64 {
-	if t.IsZero() {
-		return 0
 	}
-	return time.Since(t).Seconds()
-}
