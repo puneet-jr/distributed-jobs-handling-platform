@@ -1,7 +1,7 @@
 // internal/observability/metrics.go
 package observability
 
-import (
+import (	
 	"github.com/prometheus/client_golang/prometheus"
 )
 
@@ -67,7 +67,7 @@ func NewMetrics(reg *prometheus.Registry) *Metrics {
 		}, []string{"job_type", "worker_id"}),
 
 		JobWait: prometheus.NewHistogramVec(prometheus.HistogramOpts{
-			Name:    "job_wait_duration_seconds",
+			Name:    "job_wait_duration_seconds",	
 			Help:    "Time between job creation and worker start.",
 			Buckets: prometheus.DefBuckets,
 		}, []string{"job_type"}),
