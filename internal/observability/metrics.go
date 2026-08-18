@@ -1,24 +1,24 @@
-// internal/observability/metrics.go
 package observability
 
-import (	
+import (
 	"github.com/prometheus/client_golang/prometheus"
 )
 
 type Metrics struct {
-	JobsCreated      *prometheus.CounterVec
-	JobsStarted      *prometheus.CounterVec
-	JobsCompleted    *prometheus.CounterVec
-	JobsFailed       *prometheus.CounterVec
-	JobsRetried      *prometheus.CounterVec
-	HandlerErrors    *prometheus.CounterVec
-	WorkerPollErrors *prometheus.CounterVec
-	WorkerActiveJobs *prometheus.GaugeVec
-	JobProcessing    *prometheus.HistogramVec
-	JobWait          *prometheus.HistogramVec
+	JobsCreated        *prometheus.CounterVec
+	JobsStarted        *prometheus.CounterVec
+	JobsCompleted      *prometheus.CounterVec
+	JobsFailed         *prometheus.CounterVec
+	JobsRetried        *prometheus.CounterVec
+	QueueDepth         prometheus.Gauge
+	WorkerActiveJobs   *prometheus.GaugeVec
+	WorkerPollErrors   *prometheus.CounterVec
+	HandlerErrors      *prometheus.CounterVec
+	JobProcessingTime  *prometheus.HistogramVec
+	JobWaitTime        *prometheus.HistogramVec
 }
 
-func NewMetrics(reg *prometheus.Registry) *Metrics {
+func NewMetrics(reg prometheus.Registerer) *Metrics {
 	m := &Metrics{
 		JobsCreated: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "jobs_created_total",
@@ -45,29 +45,34 @@ func NewMetrics(reg *prometheus.Registry) *Metrics {
 			Help: "Total jobs scheduled for retry.",
 		}, []string{"job_type", "worker_id"}),
 
-		HandlerErrors: prometheus.NewCounterVec(prometheus.CounterOpts{
-			Name: "handler_errors_total",
-			Help: "Total handler execution errors.",
-		}, []string{"job_type", "worker_id"}),
+		QueueDepth: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "queue_depth",
+			Help: "Current queue depth.",
+		}),
+
+		WorkerActiveJobs: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "worker_active_jobs",
+			Help: "Jobs currently being processed by worker.",
+		}, []string{"worker_id"}),
 
 		WorkerPollErrors: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "worker_poll_errors_total",
 			Help: "Total queue polling errors.",
 		}, []string{"worker_id"}),
 
-		WorkerActiveJobs: prometheus.NewGaugeVec(prometheus.GaugeOpts{
-			Name: "worker_active_jobs",
-			Help: "Current active jobs per worker.",
-		}, []string{"worker_id"}),
+		HandlerErrors: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "handler_errors_total",
+			Help: "Total handler execution errors.",
+		}, []string{"job_type", "worker_id"}),
 
-		JobProcessing: prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		JobProcessingTime: prometheus.NewHistogramVec(prometheus.HistogramOpts{
 			Name:    "job_processing_duration_seconds",
 			Help:    "Time spent processing jobs.",
 			Buckets: prometheus.DefBuckets,
 		}, []string{"job_type", "worker_id"}),
 
-		JobWait: prometheus.NewHistogramVec(prometheus.HistogramOpts{
-			Name:    "job_wait_duration_seconds",	
+		JobWaitTime: prometheus.NewHistogramVec(prometheus.HistogramOpts{
+			Name:    "job_wait_duration_seconds",
 			Help:    "Time between job creation and worker start.",
 			Buckets: prometheus.DefBuckets,
 		}, []string{"job_type"}),
@@ -78,6 +83,14 @@ func NewMetrics(reg *prometheus.Registry) *Metrics {
 		m.JobsStarted,
 		m.JobsCompleted,
 		m.JobsFailed,
+		m.JobsRetried,
+		m.QueueDepth,
+		m.WorkerActiveJobs,
+		m.WorkerPollErrors,
+		m.HandlerErrors,
+		m.JobProcessingTime,
+		m.JobWaitTime,
 	)
+
 	return m
-	}
+}

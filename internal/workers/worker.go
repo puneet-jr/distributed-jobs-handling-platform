@@ -295,3 +295,4 @@ func (w *Worker) processMessage(ctx context.Context, slot int, msg Message) {
 
 	logger.Info("job completed", "duration_ms", time.Since(start).Milliseconds())
 }
+
