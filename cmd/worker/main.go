@@ -16,7 +16,10 @@ import (
 	"distributed-job-platform/internal/bootstrap"
 	"distributed-job-platform/internal/infrastructure/postgres"
 	"distributed-job-platform/internal/infrastructure/redisqueue"
+	"distributed-job-platform/internal/observability"
 	"distributed-job-platform/internal/workers"
+
+	"github.com/prometheus/client_golang/prometheus"
 
 	_ "github.com/lib/pq"
 	"github.com/redis/go-redis/v9"
@@ -101,8 +104,15 @@ func main() {
 		os.Exit(1)
 	}
 
+	registryMetrics := prometheus.NewRegistry()
+	metrics := observability.NewMetrics(registryMetrics)
+
 	// Worker uses the queue only for recovery/retry re-enqueue, not job creation.
-	jobService := appjob.NewService(repo, producer)
+	jobService, err := appjob.NewService(repo, producer, metrics)
+	if err != nil {
+		logger.Error("failed to create job service", "error", err)
+		os.Exit(1)
+	}
 
 	workerID := os.Getenv("WORKER_ID")
 	if workerID == "" {
@@ -126,6 +136,7 @@ func main() {
 		logger,
 		concurrency,
 		batchSize,
+		metrics,
 	)
 	if err != nil {
 		logger.Error("failed to create worker", "error", err)

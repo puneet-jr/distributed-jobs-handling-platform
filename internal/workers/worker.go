@@ -10,6 +10,7 @@ import (
 	"time"
 
 	appjob "distributed-job-platform/internal/application/job"
+	"distributed-job-platform/internal/observability"
 )
 
 type Worker struct {
@@ -20,6 +21,7 @@ type Worker struct {
 	logger      *slog.Logger
 	concurrency int
 	batchSize   int
+	metrics     *observability.Metrics
 }
 
 func NewWorker(
@@ -30,6 +32,7 @@ func NewWorker(
 	logger *slog.Logger,
 	concurrency int,
 	batchSize int,
+	metrics *observability.Metrics,
 ) (*Worker, error) {
 	if id == "" {
 		return nil, errors.New("worker id is required")
@@ -66,6 +69,7 @@ func NewWorker(
 		logger:      logger,
 		concurrency: concurrency,
 		batchSize:   batchSize,
+		metrics:     metrics,
 	}, nil
 }
 
@@ -95,6 +99,10 @@ func (w *Worker) Run(ctx context.Context) error {
 			messages, err := w.readMessages(ctx)
 			if err != nil {
 				w.logger.Error("queue read failed", "error", err)
+
+				if w.metrics != nil {
+					w.metrics.WorkerPollErrors.WithLabelValues(w.id).Inc()
+				}
 
 				// FIX: time.Sleep(time.Second) was not interruptible.
 				// If ctx was cancelled during the sleep, shutdown would
@@ -246,6 +254,15 @@ func (w *Worker) processMessage(ctx context.Context, slot int, msg Message) {
 		return
 	}
 
+	// Record that this worker successfully started processing the job.
+	// Active jobs is a gauge, so it is incremented when processing starts
+	// and decremented when processing finishes.
+	if w.metrics != nil {
+		w.metrics.JobsStarted.WithLabelValues(msg.Type, w.id).Inc()
+		w.metrics.WorkerActiveJobs.WithLabelValues(w.id).Inc()
+		defer w.metrics.WorkerActiveJobs.WithLabelValues(w.id).Dec()
+	}
+
 	job, err := w.service.GetDomainJobByID(ctx, msg.JobID)
 	if err != nil {
 		logger.Error("failed to load job", "error", err)
@@ -277,6 +294,13 @@ func (w *Worker) processMessage(ctx context.Context, slot int, msg Message) {
 			"error", err,
 			"duration_ms", time.Since(start).Milliseconds(),
 		)
+
+		if w.metrics != nil {
+			w.metrics.HandlerErrors.WithLabelValues(job.Type, w.id).Inc()
+			w.metrics.JobsRetried.WithLabelValues(job.Type, w.id).Inc()
+			w.metrics.JobProcessingTime.WithLabelValues(job.Type, w.id).Observe(time.Since(start).Seconds())
+		}
+
 		return
 	}
 
@@ -293,6 +317,10 @@ func (w *Worker) processMessage(ctx context.Context, slot int, msg Message) {
 		return
 	}
 
+	if w.metrics != nil {
+		w.metrics.JobsCompleted.WithLabelValues(job.Type, w.id).Inc()
+		w.metrics.JobProcessingTime.WithLabelValues(job.Type, w.id).Observe(time.Since(start).Seconds())
+	}
+
 	logger.Info("job completed", "duration_ms", time.Since(start).Milliseconds())
 }
-

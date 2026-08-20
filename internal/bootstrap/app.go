@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/redis/go-redis/v9"
 
 	appjob "distributed-job-platform/internal/application/job"
@@ -95,14 +94,19 @@ func NewApp(ctx context.Context, configPath string) (*App, error) {
 
 	// Step 8: Create Application Service (injecting repo, queue, AND metrics)
 	// This enforces the rule: validate -> store in Postgres -> enqueue in Redis -> return 202
-	jobService := appjob.NewService(repo, jobQueue, metrics)
+	jobService, err := appjob.NewService(repo, jobQueue, metrics)
+	if err != nil {
+		_ = redisClient.Close()
+		_ = db.Close()
+		return nil, fmt.Errorf("failed to create job service: %w", err)
+	}
+
 
 	// Step 9: Create HTTP Handler and Router
 	jobHandler := httpapi.NewJobHandler(jobService)
 	router := httpapi.NewRouter(
 		jobHandler,
 		NewHealthHandler(logger, db),
-		promhttp.HandlerFor(registry, promhttp.HandlerOpts{}),
 	)
 
 	// Step 10: Configure HTTP Server with secure timeouts
