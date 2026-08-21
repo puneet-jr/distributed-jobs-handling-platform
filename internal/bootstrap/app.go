@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/redis/go-redis/v9"
 
 	appjob "distributed-job-platform/internal/application/job"
@@ -43,16 +44,17 @@ func NewApp(ctx context.Context, configPath string) (*App, error) {
 		return nil, fmt.Errorf("failed to open database: %w", err)
 	}
 
-	// Why PingContext? Fail fast on startup instead of failing on the first HTTP request.
+	// Fail fast on startup instead of failing on the first HTTP request.
 	if err := db.PingContext(ctx); err != nil {
-		db.Close()
+		_ = db.Close()
 		return nil, fmt.Errorf("failed to ping database: %w", err)
 	}
 
-	// Configure connection pool to prevent resource exhaustion
+	// Configure connection pool to prevent resource exhaustion.
 	db.SetConnMaxLifetime(5 * time.Minute)
 	db.SetMaxOpenConns(25)
 	db.SetMaxIdleConns(5)
+
 	logger.Info("database connection established")
 
 	// Step 4: Connect to Redis
@@ -62,12 +64,12 @@ func NewApp(ctx context.Context, configPath string) (*App, error) {
 		DB:       cfg.Redis.DB,
 	})
 
-	// Why Ping Redis on startup?
 	// The API cannot honestly return 202 Accepted if it cannot enqueue jobs.
 	if err := redisClient.Ping(ctx).Err(); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("failed to ping redis: %w", err)
 	}
+
 	logger.Info("redis connection established")
 
 	// Step 5: Initialize Queue Abstraction
@@ -75,7 +77,11 @@ func NewApp(ctx context.Context, configPath string) (*App, error) {
 	if err != nil {
 		_ = redisClient.Close()
 		_ = db.Close()
-		return nil, fmt.Errorf("failed to create job queue: %w", err)
+
+		return nil, fmt.Errorf(
+			"failed to create job queue: %w",
+			err,
+		)
 	}
 
 	// Step 6: Create Repository
@@ -83,40 +89,70 @@ func NewApp(ctx context.Context, configPath string) (*App, error) {
 	if err != nil {
 		_ = redisClient.Close()
 		_ = db.Close()
-		return nil, fmt.Errorf("failed to create repository: %w", err)
+
+		return nil, fmt.Errorf(
+			"failed to create repository: %w",
+			err,
+		)
 	}
 
-	// Step 7: Initialize Prometheus metrics
-	// A dedicated registry (instead of the global default) keeps this
-	// process's metrics isolated and testable.
+	// Step 7: Initialize Prometheus metrics.
+	//
+	// Use a dedicated registry so the application's metrics are
+	// isolated and testable.
 	registry := prometheus.NewRegistry()
 	metrics := observability.NewMetrics(registry)
 
-	// Step 8: Create Application Service (injecting repo, queue, AND metrics)
-	// This enforces the rule: validate -> store in Postgres -> enqueue in Redis -> return 202
-	jobService, err := appjob.NewService(repo, jobQueue, metrics)
+	// Step 8: Create Application Service.
+	//
+	// The service receives the repository, queue, and metrics.
+	jobService, err := appjob.NewService(
+		repo,
+		jobQueue,
+		metrics,
+	)
 	if err != nil {
 		_ = redisClient.Close()
 		_ = db.Close()
-		return nil, fmt.Errorf("failed to create job service: %w", err)
+
+		return nil, fmt.Errorf(
+			"failed to create job service: %w",
+			err,
+		)
 	}
 
+	// Create a Prometheus HTTP handler using the SAME custom
+	// registry that the application metrics were registered with.
+	metricsHandler := promhttp.HandlerFor(
+		registry,
+		promhttp.HandlerOpts{},
+	)
 
 	// Step 9: Create HTTP Handler and Router
 	jobHandler := httpapi.NewJobHandler(jobService)
+
 	router := httpapi.NewRouter(
 		jobHandler,
 		NewHealthHandler(logger, db),
+		metricsHandler,
 	)
 
 	// Step 10: Configure HTTP Server with secure timeouts
 	server := &http.Server{
 		Addr:              fmt.Sprintf(":%d", cfg.HTTP.Port),
 		Handler:           router,
-		ReadHeaderTimeout: 5 * time.Second,  // Prevents Slowloris attacks
-		ReadTimeout:       30 * time.Second, // Limits request body read time
-		WriteTimeout:      30 * time.Second, // Limits response write time
-		IdleTimeout:       60 * time.Second, // Closes idle keep-alive connections
+
+		// Prevent Slowloris-style attacks.
+		ReadHeaderTimeout: 5 * time.Second,
+
+		// Limit request body read time.
+		ReadTimeout: 30 * time.Second,
+
+		// Limit response write time.
+		WriteTimeout: 30 * time.Second,
+
+		// Close idle keep-alive connections.
+		IdleTimeout: 60 * time.Second,
 	}
 
 	return &App{
@@ -129,23 +165,39 @@ func NewApp(ctx context.Context, configPath string) (*App, error) {
 }
 
 func (a *App) Run(ctx context.Context) error {
-	a.logger.Info("starting api server", "port", a.cfg.HTTP.Port)
+	a.logger.Info(
+		"starting api server",
+		"port",
+		a.cfg.HTTP.Port,
+	)
 
-	// Goroutine for graceful shutdown
+	// Graceful shutdown.
 	go func() {
 		<-ctx.Done()
+
 		a.logger.Info("shutting down server...")
 
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		shutdownCtx, cancel := context.WithTimeout(
+			context.Background(),
+			30*time.Second,
+		)
 		defer cancel()
 
 		if err := a.server.Shutdown(shutdownCtx); err != nil {
-			a.logger.Error("server shutdown failed", "error", err)
+			a.logger.Error(
+				"server shutdown failed",
+				"error",
+				err,
+			)
 		}
 	}()
 
-	if err := a.server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-		return fmt.Errorf("server error: %w", err)
+	if err := a.server.ListenAndServe(); err != nil &&
+		err != http.ErrServerClosed {
+		return fmt.Errorf(
+			"server error: %w",
+			err,
+		)
 	}
 
 	return nil
@@ -154,22 +206,38 @@ func (a *App) Run(ctx context.Context) error {
 func (a *App) Close() error {
 	var errs []error
 
-	// Close Redis first (it's stateless for the app, just a queue)
+	// Close Redis first.
 	if a.redis != nil {
 		if err := a.redis.Close(); err != nil {
-			errs = append(errs, fmt.Errorf("failed to close redis: %w", err))
+			errs = append(
+				errs,
+				fmt.Errorf(
+					"failed to close redis: %w",
+					err,
+				),
+			)
 		}
 	}
 
-	// Close Database second
+	// Close Database second.
 	if a.db != nil {
 		if err := a.db.Close(); err != nil {
-			errs = append(errs, fmt.Errorf("failed to close database: %w", err))
+			errs = append(
+				errs,
+				fmt.Errorf(
+					"failed to close database: %w",
+					err,
+				),
+			)
 		}
 	}
 
 	if len(errs) > 0 {
-		return fmt.Errorf("errors during close: %v", errs)
+		return fmt.Errorf(
+			"errors during close: %v",
+			errs,
+		)
 	}
+
 	return nil
 }
