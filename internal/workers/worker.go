@@ -285,12 +285,24 @@ func (w *Worker) processMessage(ctx context.Context, slot int, msg Message) {
 	// delivery guarantees this will happen eventually at scale. Enforce
 	// this at the Handler interface/documentation level, not here.
 	if err := handler.Handle(ctx, *job); err != nil {
-		// Handler failed, so we schedule retry through service rules.
-		// ACK happens after retry state is safely recorded.
-		_ = w.service.MarkRetrying(ctx, msg.JobID, w.id, err.Error())
-		_ = w.queue.Ack(ctx, msg.ID)
+		// Persist retry state before ACKing.
+		// If this fails, leave the message pending so Redis can redeliver it.
+		if retryErr := w.service.MarkRetrying(ctx, msg.JobID, w.id, err.Error()); retryErr != nil {
+			logger.Error(
+				"failed to persist retry state; leaving message unacked for redelivery",
+				"handler_error", err,
+				"retry_error", retryErr,
+			)
+			return
+		}
+
+		if ackErr := w.queue.Ack(ctx, msg.ID); ackErr != nil {
+			logger.Error("failed to ack message after retry scheduling", "error", ackErr)
+			return
+		}
+
 		logger.Error(
-			"job failed and retry was scheduled",
+			"job failed and retry state was persisted",
 			"error", err,
 			"duration_ms", time.Since(start).Milliseconds(),
 		)

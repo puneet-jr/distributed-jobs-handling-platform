@@ -7,54 +7,57 @@ import (
 	"log/slog"
 	"net/http"
 	"time"
+
+	"github.com/redis/go-redis/v9"
 )
 
-// HealthHandler holds shared dependencies needed by the /health endpoint.
-// Dependencies are injected once during startup instead of created per request.
 type HealthHandler struct {
 	logger *slog.Logger
 	db     *sql.DB
+	redis  *redis.Client
 }
 
-// Return the handler method because the router expects
-// func(http.ResponseWriter, *http.Request).
-func NewHealthHandler(logger *slog.Logger, db *sql.DB) http.HandlerFunc {
+func NewHealthHandler(logger *slog.Logger, db *sql.DB, redisClient *redis.Client) http.HandlerFunc {
 	h := &HealthHandler{
 		logger: logger,
 		db:     db,
+		redis:  redisClient,
 	}
 	return h.ServeHTTP
 }
 
-// ServeHTTP handles GET /health requests.
 func (h *HealthHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-
-	// Health checks verify the application's current readiness.
-	// Startup (bootstrap) only proves the app started successfully.
 	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
-	defer cancel() // Always release the context resources.
+	defer cancel()
 
-	// JSON response. 'any' allows values of different types if needed.
 	health := map[string]any{
-		"status": "healthy",
+		"status":   "healthy",
+		"database": "up",
+		"redis":    "up",
 	}
 
-	// The app may still be running even if the database crashes later.
-	// Ping performs a live readiness check.
+	statusCode := http.StatusOK
+
 	if err := h.db.PingContext(ctx); err != nil {
 		health["status"] = "unhealthy"
 		health["database"] = "down"
-
-		// Log detailed error for debugging.
-		h.logger.Error("health check failed", "error", err)
-
-		// Tell clients/load balancers this instance shouldn't receive traffic.
-		w.WriteHeader(http.StatusServiceUnavailable)
-	} else {
-		health["database"] = "up"
+		statusCode = http.StatusServiceUnavailable
+		h.logger.Error("database health check failed", "error", err)
 	}
 
-	// Return the health report as JSON.
+	if err := h.redis.Ping(ctx).Err(); err != nil {
+		health["status"] = "unhealthy"
+		health["redis"] = "down"
+		statusCode = http.StatusServiceUnavailable
+		h.logger.Error("redis health check failed", "error", err)
+	}
+
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(health)
+	w.WriteHeader(statusCode)
+	_ = json.NewEncoder(w).Encode(health)
 }
+
+/*  What this piece does in the flow:
+load balancer or operator calls /health -> handler probes both acceptance-path
+dependencies -> if either durable storage or enqueue path is down, readiness fails. That
+makes the endpoint useful for real traffic control, not just a partial liveness check.*/
