@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"log/slog"
+	"net/http"
 	"os"
 	"os/signal"
 	"strconv"
@@ -19,21 +21,27 @@ import (
 	"distributed-job-platform/internal/observability"
 	"distributed-job-platform/internal/workers"
 
+	"github.com/lib/pq"
 	"github.com/prometheus/client_golang/prometheus"
-
-	_ "github.com/lib/pq"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/redis/go-redis/v9"
 )
 
 func main() {
-	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	ctx, cancel := signal.NotifyContext(
+		context.Background(),
+		syscall.SIGINT,
+		syscall.SIGTERM,
+	)
 	defer cancel()
 
 	// Second signal forces immediate exit if graceful shutdown hangs.
 	go func() {
 		<-ctx.Done()
+
 		second := make(chan os.Signal, 1)
 		signal.Notify(second, syscall.SIGINT, syscall.SIGTERM)
+
 		<-second
 		os.Exit(1)
 	}()
@@ -49,6 +57,10 @@ func main() {
 	}
 
 	logger := bootstrap.NewLogger(cfg.App.Env)
+
+	// ------------------------------------------------------------
+	// PostgreSQL
+	// ------------------------------------------------------------
 
 	db, err := sql.Open("postgres", cfg.Postgres.DSN())
 	if err != nil {
@@ -66,6 +78,10 @@ func main() {
 		os.Exit(1)
 	}
 
+	// ------------------------------------------------------------
+	// Redis
+	// ------------------------------------------------------------
+
 	redisClient := redis.NewClient(&redis.Options{
 		Addr:     cfg.Redis.Address(),
 		Password: cfg.Redis.Password,
@@ -81,38 +97,105 @@ func main() {
 	const stream = "jobs"
 	const group = "job-workers"
 
-	if err := redisqueue.EnsureConsumerGroup(ctx, redisClient, stream, group); err != nil {
-		logger.Error("failed to ensure consumer group", "error", err)
+	if err := redisqueue.EnsureConsumerGroup(
+		ctx,
+		redisClient,
+		stream,
+		group,
+	); err != nil {
+		logger.Error(
+			"failed to ensure consumer group",
+			"error",
+			err,
+		)
 		os.Exit(1)
 	}
 
-	consumer, err := redisqueue.NewJobConsumer(redisClient, stream, group, 5*time.Second)
+	consumer, err := redisqueue.NewJobConsumer(
+		redisClient,
+		stream,
+		group,
+		5*time.Second,
+	)
 	if err != nil {
-		logger.Error("failed to create queue consumer", "error", err)
+		logger.Error(
+			"failed to create queue consumer",
+			"error",
+			err,
+		)
 		os.Exit(1)
 	}
 
-	producer, err := redisqueue.NewJobQueue(redisClient, stream)
+	producer, err := redisqueue.NewJobQueue(
+		redisClient,
+		stream,
+	)
 	if err != nil {
-		logger.Error("failed to create queue producer", "error", err)
+		logger.Error(
+			"failed to create queue producer",
+			"error",
+			err,
+		)
 		os.Exit(1)
 	}
+
+	// ------------------------------------------------------------
+	// PostgreSQL repository
+	// ------------------------------------------------------------
 
 	repo, err := postgres.NewJobRepository(db)
 	if err != nil {
-		logger.Error("failed to create job repository", "error", err)
+		logger.Error(
+			"failed to create job repository",
+			"error",
+			err,
+		)
 		os.Exit(1)
 	}
+
+	// ------------------------------------------------------------
+	// Prometheus metrics
+	// ------------------------------------------------------------
 
 	registryMetrics := prometheus.NewRegistry()
 	metrics := observability.NewMetrics(registryMetrics)
 
-	// Worker uses the queue only for recovery/retry re-enqueue, not job creation.
-	jobService, err := appjob.NewService(repo, producer, metrics)
+	// Worker metrics HTTP server.
+	metricsAddr := os.Getenv("WORKER_METRICS_ADDR")
+	if metricsAddr == "" {
+		metricsAddr = ":9091"
+	}
+
+	go serveMetrics(
+		ctx,
+		logger,
+		metricsAddr,
+		registryMetrics,
+	)
+
+	// ------------------------------------------------------------
+	// Job service
+	// ------------------------------------------------------------
+
+	// Worker uses the queue only for recovery/retry re-enqueue,
+	// not for normal job creation.
+	jobService, err := appjob.NewService(
+		repo,
+		producer,
+		metrics,
+	)
 	if err != nil {
-		logger.Error("failed to create job service", "error", err)
+		logger.Error(
+			"failed to create job service",
+			"error",
+			err,
+		)
 		os.Exit(1)
 	}
+
+	// ------------------------------------------------------------
+	// Worker identity
+	// ------------------------------------------------------------
 
 	workerID := os.Getenv("WORKER_ID")
 	if workerID == "" {
@@ -120,13 +203,32 @@ func main() {
 		workerID = fmt.Sprintf("worker-%s", hostname)
 	}
 
+	// ------------------------------------------------------------
+	// Handler registry
+	// ------------------------------------------------------------
+
 	registry := workers.HandlerRegistry{
 		"email.send":   workers.NewEmailHandler(logger),
 		"pdf.generate": workers.NewPDFHandler(logger),
 	}
 
-	concurrency := envInt("WORKER_CONCURRENCY", 10)
-	batchSize := envInt("WORKER_BATCH_SIZE", concurrency)
+	// ------------------------------------------------------------
+	// Worker configuration
+	// ------------------------------------------------------------
+
+	concurrency := envInt(
+		"WORKER_CONCURRENCY",
+		10,
+	)
+
+	batchSize := envInt(
+		"WORKER_BATCH_SIZE",
+		concurrency,
+	)
+
+	// ------------------------------------------------------------
+	// Create worker
+	// ------------------------------------------------------------
 
 	worker, err := workers.NewWorker(
 		workerID,
@@ -139,22 +241,99 @@ func main() {
 		metrics,
 	)
 	if err != nil {
-		logger.Error("failed to create worker", "error", err)
+		logger.Error(
+			"failed to create worker",
+			"error",
+			err,
+		)
 		os.Exit(1)
 	}
 
-	logger.Info("worker started",
+	logger.Info(
+		"worker started",
 		"worker_id", workerID,
 		"concurrency", concurrency,
 		"batch_size", batchSize,
+		"metrics_addr", metricsAddr,
 	)
 
-	if err := worker.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
-		logger.Error("worker stopped with error", "error", err)
+	// ------------------------------------------------------------
+	// Start worker
+	// ------------------------------------------------------------
+
+	if err := worker.Run(ctx); err != nil &&
+		!errors.Is(err, context.Canceled) {
+		logger.Error(
+			"worker stopped with error",
+			"error",
+			err,
+		)
 		os.Exit(1)
 	}
 
 	logger.Info("worker stopped")
+}
+
+// serveMetrics exposes the worker's Prometheus metrics.
+//
+// Example:
+//   http://localhost:9091/metrics
+func serveMetrics(
+	ctx context.Context,
+	logger *slog.Logger,
+	addr string,
+	registry *prometheus.Registry,
+) {
+	mux := http.NewServeMux()
+
+	mux.Handle(
+		"/metrics",
+		promhttp.HandlerFor(
+			registry,
+			promhttp.HandlerOpts{},
+		),
+	)
+
+	server := &http.Server{
+		Addr:              addr,
+		Handler:           mux,
+		ReadHeaderTimeout: 5 * time.Second,
+	}
+
+	// Gracefully shut down the metrics server
+	// when the worker context is cancelled.
+	go func() {
+		<-ctx.Done()
+
+		shutdownCtx, cancel := context.WithTimeout(
+			context.Background(),
+			5*time.Second,
+		)
+		defer cancel()
+
+		if err := server.Shutdown(shutdownCtx); err != nil {
+			logger.Error(
+				"worker metrics server shutdown failed",
+				"error",
+				err,
+			)
+		}
+	}()
+
+	logger.Info(
+		"worker metrics server started",
+		"addr",
+		addr,
+	)
+
+	if err := server.ListenAndServe(); err != nil &&
+		!errors.Is(err, http.ErrServerClosed) {
+		logger.Error(
+			"worker metrics server failed",
+			"error",
+			err,
+		)
+	}
 }
 
 func envInt(key string, fallback int) int {
@@ -162,9 +341,11 @@ func envInt(key string, fallback int) int {
 	if v == "" {
 		return fallback
 	}
+
 	n, err := strconv.Atoi(v)
 	if err != nil || n <= 0 {
 		return fallback
 	}
+
 	return n
 }
